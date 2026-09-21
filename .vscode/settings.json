@@ -1,0 +1,4 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/ur5e_experiments/.venv/Scripts/python.exe",
+  "python.venvPath": "${workspaceFolder}/ur5e_experiments"
+}
