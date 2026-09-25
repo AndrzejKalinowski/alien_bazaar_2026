@@ -1,12 +1,9 @@
 import rtde_control, rtde_receive
-import serial
 from time import sleep
 from pygamepad.gamepads import Gamepad
+from suction import Suction
 
 IP = "192.168.1.20"
-
-SUCTION_PORT = "COM9"
-SUCTION_BAUDRATE = 115200
 
 HOME_Q = [0, -1.57, 1.57, -1.57, -1.57, 0]
 
@@ -92,8 +89,7 @@ def main():
     gamepad = Gamepad()
     gamepad.listen()
 
-    suction = serial.Serial(SUCTION_PORT, SUCTION_BAUDRATE, timeout=0)
-    sleep(2)  # let the suction controller reset after opening the serial port
+    suction = Suction()
 
     r, c = connect_rtde()
 
@@ -111,13 +107,13 @@ def main():
 
                 if b.BTN_EAST.is_just_pressed:
                     print("Grip")
-                    suction.write(b"GRIP\n")
+                    suction.grip()
                     sleep(0.1)
                     continue
 
                 if b.BTN_WEST.is_just_pressed:
                     print("Release")
-                    suction.write(b"RELEASE\n")
+                    suction.release()
                     sleep(0.1)
                     continue
 
