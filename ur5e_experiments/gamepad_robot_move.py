@@ -2,7 +2,7 @@ import rtde_control, rtde_receive
 from time import sleep
 from pygamepad.gamepads import Gamepad
 
-IP = "127.0.0.1"
+IP = "192.168.1.20"
 
 def main():
     gamepad = Gamepad()
