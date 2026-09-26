@@ -58,7 +58,7 @@ DEFAULT_SPEED = 1500       # steps/s (4096 steps per turn, ST3215 max ~3400)
 DEFAULT_ACCELERATION = 50  # units of 100 steps/s^2, 0 = maximum
 
 SPRAYER_REST_DEG = 280.0   # servo angle with the pump released
-SPRAYER_PRESS_DEG = 256.0  # servo angle with the pump pressed
+SPRAYER_PRESS_DEG = 250.0  # servo angle with the pump pressed
 SPRAY_PERIOD = 2.0         # seconds between the starts of two strokes
 SPRAY_HOLD = 0.2           # seconds to hold the pump pressed
 SPRAYER_SPEED = 5500
