@@ -57,7 +57,7 @@ The real bug was that `Suction.grip()` always cleared `_grip_result`, even when 
 [find_glasses.py:338](ur5e_experiments/find_glasses.py#L338): `detect()` returns early when `HoughCircles` finds nothing, *before* `self.rejected = []`. The red "rejected" circles from the last frame that had detections stay on screen. This is misleading while tuning the trackbars.
 *Fix:* reset `self.rejected` at the top of `detect()`.
 
-**8. `RIM_HEIGHT` means two different things**
+**8. `RIM_HEIGHT` means two different things** *Fixed on branch `fix/audit`: `pick_place_glasses.GLASS_HEIGHT` (same 0.075 m), `GlassFinder.load(rim_height=...)`.*
 In `find_glasses.py` it is the height of the circle seen for *upright* glasses. `pick_place_glasses.py` reuses `fg.RIM_HEIGHT` as the *full height of an upside-down glass* (where the cup lands, and the carry height is computed as 2 × `RIM_HEIGHT` + clearance). Tuning it for one script silently changes the other.
 *Fix:* give `pick_place_glasses.py` its own `GLASS_HEIGHT` and build the `GlassFinder` with it (add a `rim_height` parameter to `GlassFinder.load`).
 

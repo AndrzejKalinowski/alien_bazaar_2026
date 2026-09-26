@@ -4,8 +4,9 @@ and put it down on an AprilTag lying on the table.
 
 Uses everything from find_glasses.py (camera calibration, detection area,
 colour filter, trackbars); the glasses stand upside down, so the circle seen
-from above is the foot and RIM_HEIGHT there must be the glass height (table to
-top of the foot), which is where the suction cup grabs.
+from above is the foot. GLASS_HEIGHT (table to top of the foot) is both the
+height of that circle for the detection and where the suction cup grabs; it is
+separate from find_glasses.RIM_HEIGHT, so tuning one script can't break the other.
 
 Sequence (p / gamepad Y):
   1. Measure the glasses and the place tag (averaged over several frames; the
@@ -60,6 +61,7 @@ from suction import key_command
 
 PLACE_TAG_ID = None          # None = the lowest id in view
 PLACED_RADIUS = 0.04         # m, a glass this close to the tag already stands on it
+GLASS_HEIGHT = 0.075         # m, upside-down glass: table to top of the foot (seen circle, cup lands here)
 
 CARRY_CLEARANCE = 0.05       # m, gap under the carried glass over the other glasses
 APPROACH_GAP = 0.02          # m, stop this far above the foot / placing height, then go slowly
@@ -160,12 +162,12 @@ class HomeTask(Task):
 
 
 class PickPlaceTask(Task):
-    def __init__(self, r, c, suction, glass, place_xy, table_z, rim_height):
+    def __init__(self, r, c, suction, glass, place_xy, table_z, glass_height):
         self.suction = suction
         self.glass = glass
         self.place_xy = np.asarray(place_xy)
         self.table_z = table_z
-        self.rim_height = rim_height
+        self.glass_height = glass_height
         super().__init__(r, c)
 
     def move_to(self, xyz, label, holding=False):
@@ -204,9 +206,9 @@ class PickPlaceTask(Task):
         self.rotation = list(start[3:])
 
         g = self.glass
-        foot_z = self.table_z + self.rim_height       # tip height on top of the glass
-        # The carried glass hangs rim_height below the tip, over glasses rim_height tall
-        carry_z = self.table_z + 2 * self.rim_height + CARRY_CLEARANCE
+        foot_z = self.table_z + self.glass_height       # tip height on top of the glass
+        # The carried glass hangs glass_height below the tip, over glasses glass_height tall
+        carry_z = self.table_z + 2 * self.glass_height + CARRY_CLEARANCE
         if carry_z > MAX_TCP_Z:
             raise TaskFailed(f"carry height {carry_z:.3f} m is above MAX_TCP_Z")
         tx, ty = self.place_xy
@@ -281,7 +283,7 @@ def draw_place(image, finder, place_xy, seen):
 
 def main():
     cap, width, height = fg.open_camera()
-    finder = fg.GlassFinder.load(width, height)
+    finder = fg.GlassFinder.load(width, height, rim_height=GLASS_HEIGHT)
     detector = fg.make_tag_detector()
     editor = fg.AreaEditor(finder)
     fg.setup_window(editor)
@@ -372,7 +374,7 @@ def main():
                         status = warn("no glass found, p ignored")
                         continue
                     task = PickPlaceTask(r, c, suction, glass, place_xy,
-                                         finder.table_z, fg.RIM_HEIGHT)
+                                         finder.table_z, GLASS_HEIGHT)
     except KeyboardInterrupt:
         pass
     finally:

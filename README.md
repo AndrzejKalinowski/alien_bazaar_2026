@@ -363,7 +363,7 @@ Glasses are transparent, so they are found by the **bright ring of their rim/foo
 7. **Nesting**: largest first; drop circles whose centre lies inside an accepted one (the base seen through the glass, reflections).
 8. **`measure()`**: repeat over 15 frames, cluster by position (within ¼ diameter), keep clusters seen in ≥ 50 % of frames, return the median.
 
-For the upside-down glasses of the pick-and-place demo, the visible circle is the **foot**, so `RIM_HEIGHT` must equal the **full glass height**, which is where the cup lands.
+For the upside-down glasses of the pick-and-place demo, the visible circle is the **foot**, so `pick_place_glasses.py` uses its own `GLASS_HEIGHT` (the **full glass height**, which is also where the cup lands) instead of `RIM_HEIGHT`. The two are separate constants, so tuning `find_glasses.py` does not change the demo.
 
 ---
 
@@ -460,7 +460,7 @@ The settings are module-level constants (UPPER_CASE, units in comments) at the t
 | Wrist camera index | `follow_april_tag.py` (`CAMERA_INDEX`) | `0` |
 | Overhead camera index | `find_glasses.py` (`OVERHEAD_CAMERA_INDEX`) | `2` |
 | AprilTag size (wrist picker, hand-eye) | `follow_april_tag.py` (`TAG_SIZE`) | 0.08 m |
-| Glass geometry | `find_glasses.py` (`RIM_HEIGHT`, `GLASS_MIN/MAX_DIAMETER`) | 0.075, 0.05–0.10 m |
+| Glass geometry | `find_glasses.py` (`RIM_HEIGHT`, `GLASS_MIN/MAX_DIAMETER`), `pick_place_glasses.py` (`GLASS_HEIGHT`) | 0.075, 0.05–0.10 m, 0.075 m |
 | Place tag | `pick_place_glasses.py` (`PLACE_TAG_ID`) | `None` = lowest id in view |
 | Motion speeds / forces | top of `pick_place_glasses.py`, `follow_april_tag.py`, `gamepad_jog.py` | see files |
 
@@ -476,7 +476,7 @@ To find COM ports: Device Manager → Ports, or `python -m serial.tools.list_por
 | `RTDE control script is not running` | A protective stop, an e-stop, local mode or the watchdog killed the script. The watchdog-enabled scripts re-upload it by themselves (after the stop is cleared on the pendant); otherwise restart the script. Also make sure no PolyScope program is running |
 | "Robot control script stopped (main loop stalled?)" | The watchdog fired: the loop sent nothing for 0.2 s. Look for something blocking the loop (a slow camera, dragging the window) |
 | Wrong camera opens / "calibrated at … but camera gives …" | Windows renumbered the USB cameras. Change `CAMERA_INDEX` / `OVERHEAD_CAMERA_INDEX`. Check that the image is the one you expect before trusting the calibration |
-| Glass positions consistently off by a few mm to cm | Wrong `RIM_HEIGHT` for the kind of glass, the camera was bumped (redo step 3), or the TCP changed on the pendant |
+| Glass positions consistently off by a few mm to cm | Wrong `RIM_HEIGHT` (`GLASS_HEIGHT` in the pick-and-place demo) for the kind of glass, the camera was bumped (redo step 3), or the TCP changed on the pendant |
 | Tag "base" position drifts while jogging (wrist camera) | Bad `hand_eye.npz` or intrinsics. Redo steps 1–2, and check `TAG_SIZE` |
 | Circles on everything | Raise `roundness %` / `edge`, lower `max saturation`, shrink the detection area, use a dark matte mat |
 | Grip always times out | Check `python suction.py` and the COM port. `GRIP FAIL` means the seal never reached 180 hPa: the cup or glass surface is dirty or wet, or the approach is off-centre. A `GRIP` while the vacuum is already on is answered with `ERR BUSY` and is harmless: the grip session and its last result stay as they are |

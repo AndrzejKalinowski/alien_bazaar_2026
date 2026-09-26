@@ -93,7 +93,7 @@ Detection area:
   detection area (magenta), glasses (green) and, with --robot, the tip (yellow).
 
 For use from other scripts:
-  finder = GlassFinder.load()
+  finder = GlassFinder.load(rim_height=0.075)   # height of the circle you see
   glasses = finder.measure(cap)   # list of Glass(x, y, z, diameter, pixel)
 
 Tips: glasses are transparent, so give them contrast: a dark matte mat on the
@@ -133,7 +133,8 @@ SETTINGS_FILE = os.path.join(HERE, "detection_settings.json")
 # --- glasses ------------------------------------------------------------------
 
 TABLE_Z = None               # m in base frame, None = take it from the calibration
-RIM_HEIGHT = 0.075            # m above the table of the circle seen from above
+RIM_HEIGHT = 0.075            # m above the table of the circle seen from above (this tool's default;
+                             # pick_place_glasses.py passes its own GLASS_HEIGHT to GlassFinder.load)
 GLASS_MIN_DIAMETER = 0.05    # m
 GLASS_MAX_DIAMETER = 0.10    # m
 RADIUS_MARGIN = 0.15         # widen the pixel radius range by this fraction
@@ -306,11 +307,12 @@ class Glass:
 
 
 class GlassFinder:
-    def __init__(self, K, T_base_cam, table_z, width, height):
+    def __init__(self, K, T_base_cam, table_z, width, height, rim_height=RIM_HEIGHT):
+        """rim_height: m above the table of the circle seen from above."""
         self.K = K
         self.T_base_cam = T_base_cam
         self.table_z = table_z
-        self.rim_z = table_z + RIM_HEIGHT
+        self.rim_z = table_z + rim_height
         self.undistort = Undistorter(width, height)
         settings = load_settings()
         self.edge_threshold = settings["edge"]
@@ -332,7 +334,7 @@ class GlassFinder:
         print(f"Camera {depth:.2f} m above the rims, glass radius {self.min_radius}-{self.max_radius} px")
 
     @classmethod
-    def load(cls, width=FRAME_WIDTH, height=FRAME_HEIGHT):
+    def load(cls, width=FRAME_WIDTH, height=FRAME_HEIGHT, rim_height=RIM_HEIGHT):
         if not os.path.exists(POSE_FILE):
             raise RuntimeError(f"No {POSE_FILE}, run: python find_glasses.py --calibrate")
         data = np.load(POSE_FILE)
@@ -341,7 +343,7 @@ class GlassFinder:
                                f"camera gives {(width, height)}")
         table_z = float(data["table_z"]) if TABLE_Z is None else TABLE_Z
         K = Undistorter(width, height).K
-        return cls(K, data["T_base_cam"], table_z, width, height)
+        return cls(K, data["T_base_cam"], table_z, width, height, rim_height)
 
     def detect(self, undistorted):
         """Glasses in one undistorted frame."""
