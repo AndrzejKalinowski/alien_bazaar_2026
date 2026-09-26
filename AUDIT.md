@@ -102,7 +102,7 @@ The constants are `ROTATOR_ID = 2` and `SPRAYER_ID = 1`, but the docstring says 
 
 **22. Hoverboard.** The two teleop scripts use opposite throttle signs: `gamepad_hoverboard_teleop.py` negates `ABS_Y` and `gamepad_xiao_teleop.py` does not. Check that forward is forward on both. `xiao_send_pwm.ino` appends to a `String` with no length limit, so a noisy line without `\n` grows the heap. Cap it at about 32 characters.
 
-**23. Docs out of date.** The old root README said "gripper RobotiQ". The actual gripper is the custom suction cup (fixed in the new README). `ur5e_experiments/README.md` has the typo "ue5 docs". The brief's file name `alien-bazaar-2026-brief (1).md` contains a space and "(1)", which is awkward to link or type. Consider renaming it to `docs/brief.md`.
+**23. Docs out of date.** *Fixed on branch `fix/audit`: typo fixed, brief moved to `docs/brief.md` (links updated).* The old root README said "gripper RobotiQ". The actual gripper is the custom suction cup (fixed in the new README). `ur5e_experiments/README.md` has the typo "ue5 docs". The brief's file name `alien-bazaar-2026-brief (1).md` contains a space and "(1)", which is awkward to link or type. Consider renaming it to `docs/brief.md`.
 
 **24. No automated tests.** Several pieces are pure functions and easy to test offline:
 - `pixel_to_plane`, `tag_centers`, `solve_camera_pose` (synthetic camera);

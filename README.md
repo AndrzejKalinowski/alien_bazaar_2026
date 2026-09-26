@@ -4,7 +4,7 @@ Code for team **Rabyte** at the [Alien Bazaar 2026](https://hacklab.so/hackathon
 
 The current demo: an **overhead camera finds glasses** on the table, the robot **picks one up with the suction cup** and **puts it down on an AprilTag**. Other parts of the repo are side experiments: a wrist-camera AprilTag picker, a hoverboard drive base and bus-servo accessories (a rotator and a pump sprayer).
 
-Background on the event, rules and other teams: [alien-bazaar-2026-brief (1).md](<alien-bazaar-2026-brief (1).md>).
+Background on the event, rules and other teams: [docs/brief.md](docs/brief.md).
 Known bugs and suggested improvements: [AUDIT.md](AUDIT.md).
 
 ---
@@ -81,7 +81,7 @@ alien_bazaar_2026/
 ├── README.md                          ← this file
 ├── CLAUDE.md                          ← guidance for AI coding assistants
 ├── AUDIT.md                           ← code audit + improvement roadmap
-├── alien-bazaar-2026-brief (1).md     ← hackathon brief (rules, hardware, teams)
+├── docs/brief.md                      ← hackathon brief (rules, hardware, teams)
 │
 ├── ur5e_experiments/                  ← everything that runs the robot
 │   ├── pick_place_glasses.py          ★ main demo: overhead camera → pick glass → place on tag
