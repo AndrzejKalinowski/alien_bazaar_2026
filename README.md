@@ -346,6 +346,8 @@ Keyboard keys work when the OpenCV video window has focus. Gamepad buttons use X
 
 Home is `HOME_Q = [0, -1.57, 1.57, -1.57, -1.57, 0]` (tool pointing down).
 
+A key that can't be carried out right now is **refused with a `WARNING`** in the console and the video window, and the program keeps running. Examples: **g** during the 1.5 s release pulse after **r** (press it again a moment later), **g** / **p** / **h** while a task runs (**s** stops it first), **p** with no glass or place tag in view, a gripper that stopped responding. A pick task that reaches the glass during a release pulse waits for it to end.
+
 ---
 
 ## 9. How the glass pipeline works
@@ -471,7 +473,7 @@ To find COM ports: Device Manager → Ports, or `python -m serial.tools.list_por
 |---|---|
 | Robot protective-stops with **C271A1 "Runtime is too much behind"** | `speedL` called with `time=0`. Always pass `SPEED_CMD_TIME` |
 | `RTDE control script is not running` | A protective stop, an e-stop, local mode or the watchdog killed the script. The watchdog-enabled scripts re-upload it by themselves (after the stop is cleared on the pendant); otherwise restart the script. Also make sure no PolyScope program is running |
-| "Robot control script stopped (main loop stalled?)" | The watchdog fired: the loop sent nothing for 0.2 s. Look for something blocking the loop (a slow camera, dragging the window, `grip()` waiting for a release pulse) |
+| "Robot control script stopped (main loop stalled?)" | The watchdog fired: the loop sent nothing for 0.2 s. Look for something blocking the loop (a slow camera, dragging the window) |
 | Wrong camera opens / "calibrated at … but camera gives …" | Windows renumbered the USB cameras. Change `CAMERA_INDEX` / `OVERHEAD_CAMERA_INDEX`. Check that the image is the one you expect before trusting the calibration |
 | Glass positions consistently off by a few mm to cm | Wrong `RIM_HEIGHT` for the kind of glass, the camera was bumped (redo step 3), or the TCP changed on the pendant |
 | Tag "base" position drifts while jogging (wrist camera) | Bad `hand_eye.npz` or intrinsics. Redo steps 1–2, and check `TAG_SIZE` |

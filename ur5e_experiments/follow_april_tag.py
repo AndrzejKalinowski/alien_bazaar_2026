@@ -26,6 +26,9 @@ Keys (in the video window) / gamepad:
   r  / X (west)    release (vacuum off)
   h  / Start       go home
   q/Esc            quit
+  A command that can't run right now (g during the 1.5 s release pulse or
+  while a task runs, p / h while a task runs or jogging, ...) is refused with a WARNING
+  in the console and the window; the program keeps running.
 
 Manual jogging with the gamepad (see gamepad_jog.py):
   left stick = move in X/Y, triggers = move in Z, hold RB = rotate instead,
@@ -67,7 +70,7 @@ import math
 from gamepad_jog import SPEED_ACCEL, GamepadControl
 from robot_watchdog import RobotWatchdog
 from serial import SerialException
-from suction import Suction
+from suction import Suction, key_command
 
 IP = "192.168.1.20"
 
@@ -437,10 +440,13 @@ class PickTask:
             self.status = (f"approach: {dist * 1000:.0f} mm, {np.degrees(angle):.0f} deg "
                            f"to go ({tag_info})")
             if self._arrived(dist, angle):
-                self._next("zero_ft")
-                self.push_dir = -n   # freeze the direction for the final push
-                self.c.zeroFtSensor()
-                self.suction.grip()
+                if self.suction.grip():
+                    self._next("zero_ft")
+                    self.push_dir = -n   # freeze the direction for the final push
+                    self.c.zeroFtSensor()
+                else:
+                    # Keep holding the approach pose until the release pulse ends
+                    self.status = "waiting for the release pulse to end"
 
         elif self.stage == "zero_ft":
             self.status = "zeroing force sensor, vacuum on"
@@ -526,12 +532,14 @@ class NoSuction:
 
     def grip(self):
         print("(no gripper) grip")
+        return True
 
     def grip_result(self):
         return "UNKNOWN"   # like the controller without a pressure sensor
 
-    def release(self):
+    def release(self, wait=False):
         print("(no gripper) release")
+        return True
 
     def close(self):
         pass
@@ -582,6 +590,12 @@ def draw(frame, tags, chosen, tcp_pose, status, camera_matrix, dist_coeffs):
     cv2.putText(frame, status, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     cv2.putText(frame, "p: pick  s: stop  g: grip  r: release  h: home  q: quit", (10, h - 15),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+
+def warn(message):
+    """A refused operator command: printed and shown in the window, the loop goes on."""
+    print(f"WARNING: {message}")
+    return message
 
 
 def main():
@@ -639,26 +653,28 @@ def main():
                             task = None
                         c.speedStop()
                         status = "stopped"
-                    elif key == "p" and task is None and not jogging:
+                    elif key in ("p", "h") and (task is not None or jogging):
+                        status = warn(f"task running, {key} ignored (s stops the task)" if task else
+                                      f"jogging, {key} ignored (release the sticks first)")
+                    elif key == "p":
                         if chosen is None:
-                            status = "no tag in view"
+                            status = warn("no tag in view, p ignored")
                         else:
                             tag_id, _, T_cam_tag = chosen
                             T_base_tag = tag_pose_in_base(tcp_pose, T_cam_tag)
                             tilt = tag_tilt_deg(T_base_tag)
                             if tilt > MAX_TILT_DEG:
-                                status = f"tag {tag_id} tilted {tilt:.0f} deg, too far to pick"
+                                status = warn(f"tag {tag_id} tilted {tilt:.0f} deg, too far to pick")
                             else:
                                 print(f"Picking tag {tag_id} (tilt {tilt:.0f} deg)")
                                 task = PickTask(r, c, suction, tag_id, T_base_tag, tcp_pose)
-                    elif key == "h" and task is None and not jogging:
+                    elif key == "h":
                         task = HomeTask(c)
-                    elif key == "g":
-                        suction.grip()
-                        status = "gripped"
-                    elif key == "r":
-                        suction.release()
-                        status = "released"
+                    elif key == "g" and task is not None:
+                        # The pick task controls the vacuum and waits for its GRIP result
+                        status = warn("task running, g ignored (s stops the task)")
+                    elif key in ("g", "r"):
+                        status = key_command(suction, key)
 
                 jog = gamepad.jog_speed()
                 if jog is not None:

@@ -54,6 +54,8 @@ Detection mode:
     q/Esc  quit
   With --robot the gamepad jogs the robot too; buttons: X = p, Y = m, A = s,
   B = t (add the tip position as an area corner).
+  Keys that can't run (m / s / t without --robot, m with no glass found, c
+  with bad points) are refused with a WARNING; the program keeps running.
   The trackbars tune edge threshold and roundness for your lighting. All
   trackbar values are saved to detection_settings.json whenever they change
   and loaded on the next start (also by GlassFinder in other scripts); delete
@@ -173,6 +175,12 @@ RUN_GAMEPAD_KEYS = {"BTN_WEST": "p", "BTN_NORTH": "m", "BTN_SOUTH": "s", "BTN_EA
 def window_closed():
     """True once the window was closed with its X button (the trackbars are gone then)."""
     return cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1
+
+
+def warn(message):
+    """A refused operator command: printed and shown in the window, the loop goes on."""
+    print(f"WARNING: {message}")
+    return message
 
 
 def read_keys(gamepad):
@@ -896,9 +904,14 @@ def calibrate(args):
                         status = "No tags found"
                 elif key == "c":
                     if len(points) < MIN_POINTS:
-                        status = f"Need at least {MIN_POINTS} points"
+                        status = warn(f"Need at least {MIN_POINTS} points, have {len(points)}")
                         continue
-                    T_base_cam, max_mm = solve_camera_pose(points, undistort.K)
+                    try:
+                        T_base_cam, max_mm = solve_camera_pose(points, undistort.K)
+                    except (RuntimeError, TypeError, cv2.error) as e:
+                        # Degenerate points (e.g. all in a line); the progress file is kept
+                        status = warn(f"Solving failed ({e}), add or fix points")
+                        continue
                     table_z = min(b[2] for _, b in points)
                     np.savez(POSE_FILE, T_base_cam=T_base_cam, table_z=table_z,
                              image_size=np.array([width, height]),
@@ -959,13 +972,15 @@ def run(args):
             if "q" in keys or "\x1b" in keys:
                 break
             for key in keys:
-                if key == "t" and rtde_r:
+                if key in ("t", "s", "m") and not rtde_c:
+                    status = warn(f"{key} needs --robot, ignored")
+                elif key == "t":
                     editor.add_point(rtde_r.getActualTCPPose()[:2])
                 elif key == "u":
                     editor.undo()
                 elif key == "x":
                     editor.clear()
-                elif key == "s" and rtde_c:
+                elif key == "s":
                     jogger.stop()
                     rtde_c.stopL(1.0)
                 elif key in ("p", "m"):
@@ -975,7 +990,9 @@ def run(args):
                     print(f"\n{len(measured)} glasses (base frame, rim z = {finder.rim_z * 1000:.0f} mm):")
                     for g in measured:
                         print(f"  x {g.x * 1000:7.1f}  y {g.y * 1000:7.1f} mm   diameter {g.diameter * 1000:.0f} mm")
-                    if key == "m" and rtde_c and measured:
+                    if key == "m" and not measured:
+                        status = warn("no glass found, m ignored")
+                    elif key == "m":
                         c = np.array([width / 2, height / 2])
                         g = min(measured, key=lambda g: np.linalg.norm(np.array(g.pixel[:2]) - c))
                         tcp = rtde_r.getActualTCPPose()

@@ -2,7 +2,7 @@ import rtde_control, rtde_receive
 from time import sleep, time
 from gamepad_jog import GamepadControl, Jogger
 from robot_watchdog import RobotWatchdog
-from suction import Suction
+from suction import Suction, key_command
 
 IP = "192.168.1.20"
 
@@ -97,20 +97,19 @@ def main():
 
                 keys = gamepad.poll_keys()
 
-                if "h" in keys and home_started is None:
+                if "h" in keys and home_started is not None:
+                    print("WARNING: already going home, h ignored")
+                elif "h" in keys:
                     print("Go home")
                     jogger.stop()
                     # Asynchronous: a blocking moveJ sends nothing and would trip the watchdog
                     c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL, True)
                     home_started = time()
 
-                if "g" in keys:
-                    print("Grip")
-                    suction.grip()
-
-                if "r" in keys:
-                    print("Release")
-                    suction.release()
+                for key in ("g", "r"):
+                    if key in keys:
+                        # Refused commands only warn, so they never reach the robot recovery below
+                        key_command(suction, key)
 
                 if home_started is not None:
                     if gamepad.jog_speed() is not None:
