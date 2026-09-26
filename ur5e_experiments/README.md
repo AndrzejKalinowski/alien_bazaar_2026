@@ -7,5 +7,7 @@ wsl -- sudo docker run --rm -it --name ursim -p 5900:5900 -p 6080:6080 -p 29999:
 web interface:
 http://localhost:6080/vnc.html
 
-# ue5 docs
+Point `IP` in `follow_april_tag.py` at `127.0.0.1` to run the scripts against it.
+
+## ur_rtde docs
 https://sdurobotics.gitlab.io/ur_rtde/index.html

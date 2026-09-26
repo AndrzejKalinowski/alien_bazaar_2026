@@ -6,9 +6,11 @@ official examples/debugMachineProtocol.py reference client:
 
     SOM(0x00) cmd CI len [ COBS/R encoded: code, payload..., checksum ]
 
-`checksum` is chosen so the byte-sum of the decoded [code, payload, checksum]
-mod 256 is zero. `len` is overwritten with the length of the COBS/R encoded
-part after encoding.
+`checksum` is chosen so the byte-sum of the whole decoded frame (SOM, cmd,
+CI, len, code, payload, checksum) mod 256 is zero, with `len` still holding
+the raw payload length at that point; `len` is then overwritten with the
+length of the COBS/R encoded part. Checked byte for byte against the
+reference client in tests/test_bipropellant_serial.py.
 
 Only WRITEVAL is implemented (ACK not requested) since that's all a gamepad
 teleop needs: push PWM values continuously, don't block on replies.

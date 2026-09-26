@@ -32,49 +32,51 @@ For **tomorrow's demo**, do items 1–4 and the "demo hardening" list at the end
 Today the only backstops are the force sensor (a protective stop on hard contact) and the e-stop.
 *Fix (small):* call `rtde_c.setWatchdog(10.0)` after connecting and `rtde_c.kickWatchdog()` once per loop iteration. ur_rtde 1.6.5 has both. The robot then stops by itself if kicks stop arriving for about 100 ms. Also give `read_frame()` a timeout (e.g. 0.5 s) that raises, so the `finally` block runs `speedStop`.
 
-**3. Pick fails when the vacuum is already on (`GRIP` → `ERR BUSY` is ignored)**
-The firmware answers `GRIP` with `ERR BUSY` while it is `GRIPPING` ([Gripper/src/main.cpp:171](Gripper/src/main.cpp#L171)). `Suction.grip()` ([suction.py:38](ur5e_experiments/suction.py#L38)) does not check this. It clears `_grip_result` to `None`, and because no new `GRIP …` line arrives, the pick tasks wait `GRIP_CONFIRM_TIMEOUT` (6 s) and then **release and abort**. This happens after:
-- pressing **g / B** manually, then **p / Y**;
-- a `"glass lost while carrying (vacuum still on)"` abort in `pick_place_glasses.py`, then retrying with **p**.
+**3. Pick after a manual grip: narrower than first reported** *Corrected and fixed on branch `fix/audit`.*
+The firmware answers `GRIP` with `ERR BUSY` while it is `GRIPPING` ([Gripper/src/main.cpp:171](Gripper/src/main.cpp#L171)) and changes nothing: the vacuum stays on with the first `GRIP`'s atmospheric baseline. The original claim here ("no new `GRIP …` line arrives") was wrong for the common cases: `updateHolding()` sends `GRIP OK` / `GRIP LOST` on every change of the held state, independent of `gripResultSent`. So **g** then **p**, or a retry after "glass lost while carrying", still gets `GRIP OK` when the cup seals on the new glass.
 
-*Fix:* in `grip()`, if the controller is `GRIPPING`, send `RELEASE` and `wait_for_release()` first, or have the pick tasks call `suction.release(wait=True)` before approaching. Do not simply re-baseline in firmware: the baseline must be taken at atmospheric pressure.
+The real bug was that `Suction.grip()` always cleared `_grip_result`, even when the controller rejected the `GRIP`. That broke two cases, both ending in a 6 s timeout, release and abort:
+- no pressure sensor: `GRIP UNKNOWN` is sent only once, at the first `GRIP`;
+- something already held when **p** is pressed: `holding` does not change, so no new `GRIP OK`.
 
-**4. Jogging has no ceiling or floor guard outside `follow_april_tag.py`**
+*Fix (done):* `grip()` no longer clears the result. It is cleared on `DONE GRIP` (the controller really started a new session with a fresh baseline) and on `release()`. The firmware is unchanged.
+
+**4. Jogging has no ceiling or floor guard outside `follow_april_tag.py`** *Fixed on branch `fix/audit`: `Jogger(c, gamepad, min_z, max_z).update(tcp_pose)` caps Z with `limit_z_speed()` (also used by `follow_april_tag`, which gains the floor guard). `pick_place_glasses` and teleop refuse a home above the ceiling, and `pick_place_glasses` aborts a task more than `CEILING_MARGIN` above it. `find_glasses` imports `MIN_TCP_Z` instead of its own copy.*
 `follow_april_tag.py` caps upward jog speed near `MAX_TCP_Z`, but `Jogger` ([gamepad_jog.py:98](ur5e_experiments/gamepad_jog.py#L98)), used by `find_glasses.py`, `pick_place_glasses.py` and `gamepad_robot_teleop.py`, sends raw stick speeds with no Z limits. `HomeTask` in [pick_place_glasses.py:126](ur5e_experiments/pick_place_glasses.py#L126) also skips the "home above ceiling" check that `follow_april_tag.HomeTask` has.
 *Fix:* move the ceiling cap (and a `MIN_TCP_Z` floor cap) into `Jogger.update()` by passing it the current TCP pose, so every script gets the same limits.
 *Status (2026-09-26):* ceiling fixed. `safe_motion.SafeControl` wraps the control interface in every active script. It caps `speedL`, and it checks `moveL` and the `moveJ` arc (including home) against `MAX_TCP_Z`. The floor (`MIN_TCP_Z`) is still not enforced for jogging.
 
 ### Medium
 
-**5. Gripper README said the release pulse was 500 ms; the code uses 1500 ms**. *Fixed in this pass.* [Gripper/src/main.cpp:13](Gripper/src/main.cpp#L13) is `RELEASE_PULSE_MS = 1500`, and `suction.py` / `pick_place_glasses.py` (`RELEASE_TIME = 1.7`) rely on 1.5 s.
+**5. Gripper README said the release pulse was 500 ms; the code uses 1500 ms**. *Fixed in this pass; on branch `fix/audit` all docs checked (1.5 s everywhere), and Gripper/README.md now names the host constants that mirror the pulse length.* [Gripper/src/main.cpp:13](Gripper/src/main.cpp#L13) is `RELEASE_PULSE_MS = 1500`, and `suction.py` / `pick_place_glasses.py` (`RELEASE_TIME = 1.7`) rely on 1.5 s.
 
-**6. The firmware cannot detect a failed pressure reading mid-run**
+**6. The firmware cannot detect a failed pressure reading mid-run** *Fixed on branch `fix/audit`: chip-ID check after every reading + 300–1100 hPa range → `NAN`. Also fixed: a `NAN` while gripping used to set `holding = false` and send a false `GRIP LOST`; now the held state is kept and `GRIP UNKNOWN` is sent after 500 ms. A sensor missing at boot is re-probed every 2 s. Built with `pio run`, not flashed.*
 [Gripper/README.md](Gripper/README.md) says `HOLD`/`PRESSURE` return `ERR NO_SENSOR` "if … a reading fails". In the code, `NaN` only happens when the sensor is missing at boot. `Adafruit_BMP085::readPressure()` returns an integer and does not report I2C errors. A loose I2C wire during the demo therefore produces garbage pressure, which can trigger a false `GRIP OK` or `GRIP LOST`.
 *Fix:* in `samplePressure()`, treat values outside 300–1100 hPa (the BMP180 range) as `NAN`. Optionally re-probe the chip ID every few seconds.
 
-**7. The rejected-circle overlay goes stale**
+**7. The rejected-circle overlay goes stale** *Fixed on branch `fix/audit`.*
 [find_glasses.py:338](ur5e_experiments/find_glasses.py#L338): `detect()` returns early when `HoughCircles` finds nothing, *before* `self.rejected = []`. The red "rejected" circles from the last frame that had detections stay on screen. This is misleading while tuning the trackbars.
 *Fix:* reset `self.rejected` at the top of `detect()`.
 
-**8. `RIM_HEIGHT` means two different things**
+**8. `RIM_HEIGHT` means two different things** *Fixed on branch `fix/audit`: `pick_place_glasses.GLASS_HEIGHT` (same 0.075 m), `GlassFinder.load(rim_height=...)`.*
 In `find_glasses.py` it is the height of the circle seen for *upright* glasses. `pick_place_glasses.py` reuses `fg.RIM_HEIGHT` as the *full height of an upside-down glass* (where the cup lands, and the carry height is computed as 2 × `RIM_HEIGHT` + clearance). Tuning it for one script silently changes the other.
 *Fix:* give `pick_place_glasses.py` its own `GLASS_HEIGHT` and build the `GlassFinder` with it (add a `rim_height` parameter to `GlassFinder.load`).
 
-**9. The place target defaults to "lowest tag id in view"**
+**9. The place target defaults to "lowest tag id in view"** *Partly done on branch `fix/audit`: the chosen id is drawn next to the place marker, and p warns (without refusing) when several tags are in view. `PLACE_TAG_ID` stays `None` on purpose: the demo tag's id is not known in advance and may change.*
 [pick_place_glasses.py:51](ur5e_experiments/pick_place_glasses.py#L51) `PLACE_TAG_ID = None`. The overhead calibration uses the same tag family, so a calibration tag left on the table can become the place target.
 *Fix:* set an explicit id for the demo, and draw the id next to the "place" marker.
 
-**10. Camera indices are fragile and documented inconsistently**
+**10. Camera indices are fragile and documented inconsistently** *Fixed on branch `fix/audit`: docstring says `--camera 2`, new `calibrate_camera.py --list-cameras` shows every index labelled with its role. Picking cameras by device name is still open.*
 `OVERHEAD_CAMERA_INDEX = 2` in [find_glasses.py:114](ur5e_experiments/find_glasses.py#L114), but [calibrate_camera.py:37](ur5e_experiments/calibrate_camera.py#L37) says `--camera 1` for the overhead camera. On Windows the DirectShow indices change when cameras are re-plugged. If the two cameras swap, each gets the other's calibration, and nothing complains, because both are 1280×720.
 *Fix:* fix the docstring. Before the demo, verify which camera is which (e.g. a `--list-cameras` helper that shows every index). Longer term, pick cameras by device name.
 
-**11. The saved detection settings effectively disable the colour filter**
-`detection_settings.json` has `"max saturation": 211` (the code default is 60), so almost nothing is rejected for colour. It may have been intentional for the current glasses or lighting. Re-check it on the demo table.
+**11. The saved detection settings effectively disable the colour filter** *Checked on branch `fix/audit`: not a bug, no change.*
+`detection_settings.json` has `"max saturation": 211` (the code default is 60), so almost nothing is rejected for colour. But it also has `"min brightness": 139` (default 0 = off), which this item first missed: circles must have a bright rim, which is how glass rims look. So the filtering was moved from colour to brightness, most likely on purpose for the current glasses and lighting. The file is runtime tuning data and was left as it is. Re-check both trackbars on the demo table (the `S.. V..` values next to each circle).
 
-**12. `bus_servos.py` docs contradict the servo ID constants**
+**12. `bus_servos.py` docs contradict the servo ID constants** *Fixed on branch `fix/audit`: docs follow the constants (rotator 2, sprayer 1).*
 The constants are `ROTATOR_ID = 2` and `SPRAYER_ID = 1`, but the docstring says "give the sprayer its own ID first: `set-id 1 2`" and the usage example builds `rotator = BusServo(bus, 1)`, `sprayer = … BusServo(bus, 2)`. Following the docstring gives the servos the wrong roles.
 
-**13. `pick_place_glasses.py` has no recovery after a robot fault**
+**13. `pick_place_glasses.py` has no recovery after a robot fault** *Fixed on branch `fix/audit`: the loop body is wrapped in `try/except`; `recover()` stops all motion and reconnects RTDE, and `RobotWatchdog.kick()` (#2) re-uploads the control script once the protective stop is cleared. Not tested on the robot or URSim.*
 `follow_april_tag.py` catches exceptions from robot calls, stops, and calls `reuploadScript()`. `pick_place_glasses.py` lets any RTDE exception (e.g. after a protective stop) end the program. During a live demo, recovering in place is much faster than restarting the script and waiting for the gripper's 2 s serial reset.
 
 ### Low
@@ -101,9 +103,9 @@ The constants are `ROTATOR_ID = 2` and `SPRAYER_ID = 1`, but the docstring says 
 
 **22. Hoverboard.** The two teleop scripts use opposite throttle signs: `gamepad_hoverboard_teleop.py` negates `ABS_Y` and `gamepad_xiao_teleop.py` does not. Check that forward is forward on both. `xiao_send_pwm.ino` appends to a `String` with no length limit, so a noisy line without `\n` grows the heap. Cap it at about 32 characters.
 
-**23. Docs out of date.** The old root README said "gripper RobotiQ". The actual gripper is the custom suction cup (fixed in the new README). `ur5e_experiments/README.md` has the typo "ue5 docs". The brief's file name `alien-bazaar-2026-brief (1).md` contains a space and "(1)", which is awkward to link or type. Consider renaming it to `docs/brief.md`.
+**23. Docs out of date.** *Fixed on branch `fix/audit`: typo fixed, brief moved to `docs/brief.md` (links updated).* The old root README said "gripper RobotiQ". The actual gripper is the custom suction cup (fixed in the new README). `ur5e_experiments/README.md` has the typo "ue5 docs". The brief's file name `alien-bazaar-2026-brief (1).md` contains a space and "(1)", which is awkward to link or type. Consider renaming it to `docs/brief.md`.
 
-**24. No automated tests.** Several pieces are pure functions and easy to test offline:
+**24. No automated tests.** *Fixed on branch `fix/audit`: 57 pytest tests (`ur5e_experiments/tests`, `hoverboard_experiments/tests`), about 2 s, all the items below plus the watchdog, jog Z limits, the #3 grip session and a pyflakes undefined-name check over every script (it flags #1 when reintroduced). `bipropellant_serial` matches the reference client byte for byte.* Several pieces are pure functions and easy to test offline:
 - `pixel_to_plane`, `tag_centers`, `solve_camera_pose` (synthetic camera);
 - `rotvec_between` / `rotation_error`;
 - `park_martin` (synthetic AX = XB with a known X);
@@ -131,7 +133,7 @@ A `pytest` file running in under a second would catch refactor slips like #1.
 
 ### Before the demo (today / tomorrow morning)
 
-1. **Fix #1–#4.** Each is a few lines. #2 (watchdog) and #3 (`ERR BUSY`) are the ones most likely to hurt you live.
+1. **Fix #1–#4.** Each is a few lines. #2 (watchdog) is the one most likely to hurt you live (#3 turned out to be narrower, see above).
 2. **Freeze and back up the calibration.** Commit the `.npz` / `.json` files, tag the commit (`git tag demo-baseline`), and copy them to a USB stick. After that, **do not move the overhead camera or change the TCP**.
 3. **Pre-flight script** (`preflight.py`, about 50 lines). It prints a pass/fail list:
    - robot reachable and not protective-stopped;

@@ -93,7 +93,7 @@ Detection area:
   detection area (magenta), glasses (green) and, with --robot, the tip (yellow).
 
 For use from other scripts:
-  finder = GlassFinder.load()
+  finder = GlassFinder.load(rim_height=0.075)   # height of the circle you see
   glasses = finder.measure(cap)   # list of Glass(x, y, z, diameter, pixel)
 
 Tips: glasses are transparent, so give them contrast: a dark matte mat on the
@@ -113,7 +113,7 @@ import cv2
 import numpy as np
 
 import safe_motion
-from follow_april_tag import IP, TAG_DICTIONARY, pose_to_matrix
+from follow_april_tag import IP, MAX_TCP_Z, MIN_TCP_Z, TAG_DICTIONARY, pose_to_matrix
 from gamepad_jog import GamepadControl, Jogger
 from robot_watchdog import RobotWatchdog
 
@@ -134,7 +134,8 @@ SETTINGS_FILE = os.path.join(HERE, "detection_settings.json")
 # --- glasses ------------------------------------------------------------------
 
 TABLE_Z = None               # m in base frame, None = take it from the calibration
-RIM_HEIGHT = 0.075            # m above the table of the circle seen from above
+RIM_HEIGHT = 0.075            # m above the table of the circle seen from above (this tool's default;
+                             # pick_place_glasses.py passes its own GLASS_HEIGHT to GlassFinder.load)
 GLASS_MIN_DIAMETER = 0.05    # m
 GLASS_MAX_DIAMETER = 0.10    # m
 RADIUS_MARGIN = 0.15         # widen the pixel radius range by this fraction
@@ -161,7 +162,6 @@ MIN_POINTS = 6
 HOVER_CHECK = 0.05           # m, tip height above the rim for the check move
 CHECK_SPEED = 0.1            # m/s
 CHECK_ACCEL = 0.3
-MIN_TCP_Z = -0.05            # m, never go lower than this
 
 WINDOW = "find glasses"
 MAP_SIZE = 300               # px, top-down map in the corner of the video
@@ -308,11 +308,12 @@ class Glass:
 
 
 class GlassFinder:
-    def __init__(self, K, T_base_cam, table_z, width, height):
+    def __init__(self, K, T_base_cam, table_z, width, height, rim_height=RIM_HEIGHT):
+        """rim_height: m above the table of the circle seen from above."""
         self.K = K
         self.T_base_cam = T_base_cam
         self.table_z = table_z
-        self.rim_z = table_z + RIM_HEIGHT
+        self.rim_z = table_z + rim_height
         self.undistort = Undistorter(width, height)
         settings = load_settings()
         self.edge_threshold = settings["edge"]
@@ -334,7 +335,7 @@ class GlassFinder:
         print(f"Camera {depth:.2f} m above the rims, glass radius {self.min_radius}-{self.max_radius} px")
 
     @classmethod
-    def load(cls, width=FRAME_WIDTH, height=FRAME_HEIGHT):
+    def load(cls, width=FRAME_WIDTH, height=FRAME_HEIGHT, rim_height=RIM_HEIGHT):
         if not os.path.exists(POSE_FILE):
             raise RuntimeError(f"No {POSE_FILE}, run: python find_glasses.py --calibrate")
         data = np.load(POSE_FILE)
@@ -343,10 +344,11 @@ class GlassFinder:
                                f"camera gives {(width, height)}")
         table_z = float(data["table_z"]) if TABLE_Z is None else TABLE_Z
         K = Undistorter(width, height).K
-        return cls(K, data["T_base_cam"], table_z, width, height)
+        return cls(K, data["T_base_cam"], table_z, width, height, rim_height)
 
     def detect(self, undistorted):
         """Glasses in one undistorted frame."""
+        self.rejected = []   # before the early return, or the last frame's stay on screen
         gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
         gray = cv2.medianBlur(gray, BLUR)
         circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT_ALT, dp=1.5,
@@ -358,7 +360,6 @@ class GlassFinder:
             return []
 
         hsv = cv2.cvtColor(undistorted, cv2.COLOR_BGR2HSV)
-        self.rejected = []
         candidates = []
         for u, v, r in circles.reshape(-1, 3):
             center = pixel_to_plane(self.K, self.T_base_cam, (u, v), self.rim_z)
@@ -827,7 +828,7 @@ def load_progress(width, height, fresh):
 def calibrate(args):
     rtde_r, rtde_c = safe_motion.connect(IP)
     gamepad = GamepadControl(CALIBRATE_GAMEPAD_KEYS)
-    jogger = Jogger(rtde_c, gamepad)
+    jogger = Jogger(rtde_c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
     cap, width, height = open_camera()
     undistort = Undistorter(width, height)
     detector = make_tag_detector()
@@ -863,7 +864,7 @@ def calibrate(args):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             cv2.imshow(WINDOW, image)
 
-            jogger.update(enabled=not freedrive)
+            jogger.update(rtde_r.getActualTCPPose(), enabled=not freedrive)
             keys = read_keys(gamepad)
             if "q" in keys or "\x1b" in keys or window_closed():
                 break
@@ -939,7 +940,7 @@ def run(args):
     if args.robot:
         rtde_r, rtde_c = safe_motion.connect(IP)
         gamepad = GamepadControl(RUN_GAMEPAD_KEYS)
-        jogger = Jogger(rtde_c, gamepad)
+        jogger = Jogger(rtde_c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
 
     editor = AreaEditor(finder)
     setup_window(editor)
@@ -956,12 +957,13 @@ def run(args):
                 jogger.stop()
                 status = "Robot was stopped (loop stall / protective stop)"
             glasses = finder.detect(image)
-            tip_xy = rtde_r.getActualTCPPose()[:2] if rtde_r else None
+            tcp = rtde_r.getActualTCPPose() if rtde_r else None
+            tip_xy = tcp[:2] if tcp else None
             draw_overlay(image, finder, editor, glasses, status, tip_xy)
             cv2.imshow(WINDOW, image)
 
             if jogger:
-                jogger.update()
+                jogger.update(tcp)
             keys = read_keys(gamepad)
             if "q" in keys or "\x1b" in keys:
                 break
@@ -990,7 +992,7 @@ def run(args):
                         c = np.array([width / 2, height / 2])
                         g = min(measured, key=lambda g: np.linalg.norm(np.array(g.pixel[:2]) - c))
                         tcp = rtde_r.getActualTCPPose()
-                        target = [g.x, g.y, max(g.z + HOVER_CHECK, MIN_TCP_Z)] + list(tcp[3:])
+                        target = [g.x, g.y, min(max(g.z + HOVER_CHECK, MIN_TCP_Z), MAX_TCP_Z)] + list(tcp[3:])
                         print(f"Moving tip above glass at {g.x * 1000:.0f}, {g.y * 1000:.0f} mm")
                         rtde_c.moveL(target, CHECK_SPEED, CHECK_ACCEL, True)
     finally:

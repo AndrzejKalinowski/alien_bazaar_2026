@@ -66,7 +66,7 @@ import numpy as np
 import math
 
 import safe_motion
-from gamepad_jog import SPEED_ACCEL, GamepadControl
+from gamepad_jog import SPEED_ACCEL, GamepadControl, limit_z_speed
 from safe_motion import CEILING_MARGIN, MAX_TCP_Z   # MAX_TCP_Z is re-exported to the other scripts
 from robot_watchdog import RobotWatchdog
 from serial import SerialException
@@ -678,6 +678,8 @@ def main():
 
                 jog = gamepad.jog_speed()
                 if jog is not None:
+                    # Slow down near the ceiling / table guard, only allow the way back beyond them
+                    limit_z_speed(jog, tcp_pose[2], MIN_TCP_Z, MAX_TCP_Z)
                     if task is not None:
                         task.abort()
                         task = None

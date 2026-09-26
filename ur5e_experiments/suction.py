@@ -9,15 +9,21 @@ After GRIP the controller reports whether an object was picked up, based on
 the vacuum measured by its pressure sensor: "GRIP OK" when the object is held,
 "GRIP FAIL" if nothing is held within 8 s (the vacuum stays on, and "GRIP OK"
 can still follow), "GRIP LOST" if the object drops while gripping, and
-"GRIP UNKNOWN" if the sensor is missing.
+"GRIP UNKNOWN" if the sensor is missing or stops giving valid readings
+while gripping (the tasks then carry on blind, as without a sensor).
 
 RELEASE fires a 1.5 s release pulse and replies "DONE RELEASE" when it ends.
 During the pulse the controller answers GRIP and RELEASE with "ERR BUSY", so
 grip() and release() refuse (return False, send nothing) while a pulse is
 still running: they are called from video loops that must not block for 1.5 s.
 Tasks retry grip() every step until it goes through; grip_and_wait() waits
-for the pulse instead. A repeated GRIP while already gripping also returns
-"ERR BUSY".
+for the pulse instead.
+
+A repeated GRIP while already gripping returns "ERR BUSY" and changes
+nothing: the vacuum stays on with the first GRIP's baseline, and GRIP OK /
+LOST still follow on every change of the held state. So grip_result() keeps
+the last report until the controller confirms a new session with
+"DONE GRIP" (or release() is called), and a pick after a manual g works.
 """
 
 import serial
@@ -54,14 +60,16 @@ class Suction:
         """
         if self.release_pending():
             return False
-        self._serial.reset_input_buffer()
-        self._buffer = b""
-        self._grip_result = None
+        # The result is not cleared here but on "DONE GRIP": if the vacuum is
+        # already on, the controller answers ERR BUSY and keeps its grip
+        # session (and baseline), so the last report (UNKNOWN, LOST, OK)
+        # stays valid. Clearing it would wait forever for a GRIP OK that
+        # only comes on a change of the held state.
         self._serial.write(b"GRIP\n")
         return True
 
     def grip_result(self):
-        """Non-blocking: the latest grip report since the last grip().
+        """Non-blocking: the latest grip report of the current grip session.
 
         Returns "OK", "FAIL", "LOST" or "UNKNOWN", or None if nothing was
         reported yet. After "FAIL" the vacuum stays on, and "OK" can still
@@ -101,6 +109,7 @@ class Suction:
         if self.release_pending():
             return False
         self._serial.write(b"RELEASE\n")
+        self._grip_result = None
         self._release_pending = True
         self._release_started = monotonic()
         if wait:
@@ -178,6 +187,8 @@ class Suction:
             line = raw.decode(errors="replace").strip()
             if line == "DONE RELEASE":
                 self._release_pending = False
+            elif line == "DONE GRIP":
+                self._grip_result = None   # a new grip session with a fresh baseline
             elif line.startswith("GRIP "):
                 self._grip_result = line.split()[1]
             if prefixes and line.startswith(prefixes):

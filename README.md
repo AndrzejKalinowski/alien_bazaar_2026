@@ -4,7 +4,7 @@ Code for team **Rabyte** at the [Alien Bazaar 2026](https://hacklab.so/hackathon
 
 The current demo: an **overhead camera finds glasses** on the table, the robot **picks one up with the suction cup** and **puts it down on an AprilTag**. Other parts of the repo are side experiments: a wrist-camera AprilTag picker, a hoverboard drive base and bus-servo accessories (a rotator and a pump sprayer).
 
-Background on the event, rules and other teams: [alien-bazaar-2026-brief (1).md](<alien-bazaar-2026-brief (1).md>).
+Background on the event, rules and other teams: [docs/brief.md](docs/brief.md).
 Known bugs and suggested improvements: [AUDIT.md](AUDIT.md).
 
 ---
@@ -81,7 +81,7 @@ alien_bazaar_2026/
 ├── README.md                          ← this file
 ├── CLAUDE.md                          ← guidance for AI coding assistants
 ├── AUDIT.md                           ← code audit + improvement roadmap
-├── alien-bazaar-2026-brief (1).md     ← hackathon brief (rules, hardware, teams)
+├── docs/brief.md                      ← hackathon brief (rules, hardware, teams)
 │
 ├── ur5e_experiments/                  ← everything that runs the robot
 │   ├── pick_place_glasses.py          ★ main demo: overhead camera → pick glass → place on tag
@@ -164,7 +164,16 @@ wsl -- sudo docker run --rm -it --name ursim -p 5900:5900 -p 6080:6080 -p 29999:
 
 Pendant in the browser: http://localhost:6080/vnc.html. Point the scripts at `127.0.0.1` (change `IP`, see [§14](#14-where-to-change-settings)). The simulated robot has no real force sensor, so force-based contact detection falls back to the max-depth limits.
 
-### 4.4 Gripper firmware
+### 4.4 Offline tests
+
+```powershell
+pip install pytest pyflakes
+python -m pytest ur5e_experiments/tests hoverboard_experiments/tests
+```
+
+No robot, gripper, camera or gamepad needed; takes about a second. They check the geometry (frames, back-projection, camera pose, hand-eye solver), the jog Z limits, the motion watchdog and the suction driver against fakes, the servo packets, the hoverboard framing against the protocol's reference client, and (with pyflakes) every script for undefined names, the kind of bug that crashed `gamepad_robot_teleop.py` (AUDIT #1). Run them before a demo and after every change.
+
+### 4.5 Gripper firmware
 
 Open `Gripper/` in VS Code with the PlatformIO extension, then **Build** and **Upload**. Or run `pio run -t upload` in `Gripper/`. Details are in [Gripper/README.md](Gripper/README.md).
 
@@ -208,6 +217,7 @@ Run everything from `ur5e_experiments/` with the venv active.
 ### Step 1: Lens calibration (each camera, once per camera + resolution)
 
 ```powershell
+python calibrate_camera.py --list-cameras # which index is which camera (check before calibrating and before a demo)
 python calibrate_camera.py --print        # optional: writes charuco_board.png (7x5, 25 mm squares) – print at 100 %
 python calibrate_camera.py                # wrist camera (index 0) -> camera_calibration.npz
 python calibrate_camera.py --camera 2 --output overhead_camera_calibration.npz   # overhead camera
@@ -273,6 +283,8 @@ The tool keeps the orientation it had at the start, which **must be within 10° 
 
 Without the gripper connected, the script prints a warning and uses `NoSuction`. The motion runs and "grip" is assumed successful. This is handy for dry runs.
 
+**Faults are recovered in place.** An error in the loop (a robot call failing after a protective stop, a lost RTDE connection, no camera frame for 0.5 s) stops all motion, aborts the task and shows a `WARNING`; the script keeps running. After a protective stop, clear it on the pendant: the control script is re-uploaded by itself. No restart, so no 2 s gripper reset either.
+
 ### 7.2 `find_glasses.py`: detection only / calibration
 
 ```powershell
@@ -304,7 +316,7 @@ Press **p / Y** to pick the tag closest to the image centre, or `TARGET_TAG_ID`.
 - **dwell**: wait for `GRIP OK`.
 - **lift**: back off 15 cm along the normal.
 
-Tags lying flat, tilted or on vertical faces all work, up to `MAX_TILT_DEG = 100°` from vertical. Normals within 8° of vertical snap to vertical. If the camera stops delivering frames for 0.5 s, the robot stops. Jogging up is slowed near the `MAX_TCP_Z` ceiling.
+Tags lying flat, tilted or on vertical faces all work, up to `MAX_TILT_DEG = 100°` from vertical. Normals within 8° of vertical snap to vertical. If the camera stops delivering frames for 0.5 s, the robot stops. Jogging is slowed near the `MAX_TCP_Z` ceiling and the `MIN_TCP_Z` table guard (in every script, see §13).
 
 **Sanity check**: with a tag lying still, jog the robot around. The "base" coordinates shown on the tag should barely change. If they drift, redo the hand-eye calibration.
 
@@ -363,7 +375,7 @@ Glasses are transparent, so they are found by the **bright ring of their rim/foo
 7. **Nesting**: largest first; drop circles whose centre lies inside an accepted one (the base seen through the glass, reflections).
 8. **`measure()`**: repeat over 15 frames, cluster by position (within ¼ diameter), keep clusters seen in ≥ 50 % of frames, return the median.
 
-For the upside-down glasses of the pick-and-place demo, the visible circle is the **foot**, so `RIM_HEIGHT` must equal the **full glass height**, which is where the cup lands.
+For the upside-down glasses of the pick-and-place demo, the visible circle is the **foot**, so `pick_place_glasses.py` uses its own `GLASS_HEIGHT` (the **full glass height**, which is also where the cup lands) instead of `RIM_HEIGHT`. The two are separate constants, so tuning `find_glasses.py` does not change the demo.
 
 ---
 
@@ -373,7 +385,7 @@ Firmware: [Gripper/src/main.cpp](Gripper/src/main.cpp) (XIAO ESP32-C3, Arduino/P
 
 - **Relays**: grip on D1 (GPIO3), release on D3 (GPIO5), both active LOW. **BMP180** on I2C D4/D5.
 - **States**: `IDLE` → `GRIP` → `GRIPPING` (vacuum relay held on) → `RELEASE` → `RELEASING` (1.5 s release pulse) → `IDLE`.
-- **Hold detection**: the pressure just before `GRIP` is the baseline. The object counts as held once the pressure has dropped **≥ 180 hPa** below it, and stops counting below 120 hPa (hysteresis). The controller sends unsolicited lines: `GRIP OK`, `GRIP FAIL` (nothing held after 8 s; the vacuum stays on), `GRIP LOST`, `GRIP UNKNOWN` (no sensor).
+- **Hold detection**: the pressure just before `GRIP` is the baseline. The object counts as held once the pressure has dropped **≥ 180 hPa** below it, and stops counting below 120 hPa (hysteresis). The controller sends unsolicited lines: `GRIP OK`, `GRIP FAIL` (nothing held after 8 s; the vacuum stays on), `GRIP LOST`, `GRIP UNKNOWN` (no sensor, or no valid reading for 500 ms while gripping). Readings from a loose I2C wire are rejected (chip ID + 300–1100 hPa range), so they cannot fake `GRIP OK` / `GRIP LOST`.
 - **Commands** (ASCII + `\n`, 115200 8N1): `STATUS`, `GRIP`, `RELEASE`, `HOLD`, `PRESSURE`. Errors: `ERR BUSY`, `ERR UNKNOWN_COMMAND`, `ERR LINE_TOO_LONG`, `ERR NO_SENSOR`.
 
 Host side: [ur5e_experiments/suction.py](ur5e_experiments/suction.py).
@@ -402,14 +414,14 @@ s.release(wait=True)
 
 ```powershell
 python bus_servos.py --port COM10 scan
-python bus_servos.py set-id 1 2          # new servos all ship as ID 1 — connect one at a time
+python bus_servos.py set-id 1 2          # new servos ship as ID 1: connect only the rotator, make it ID 2
 python bus_servos.py info 1
 python bus_servos.py rotate 2 -450
 python bus_servos.py spray 1 --count 5
 python bus_servos.py demo
 ```
 
-Current constants: `ROTATOR_ID = 2`, `SPRAYER_ID = 1`. The module docstring example uses the opposite IDs (see AUDIT.md).
+Constants: `ROTATOR_ID = 2`, `SPRAYER_ID = 1`. New servos ship as ID 1, so only the rotator needs `set-id`; the sprayer keeps ID 1.
 
 ---
 
@@ -432,11 +444,12 @@ These are software guards, **not** a replacement for the UR safety configuration
 
 | Guard | Value | Where | Effect |
 |---|---|---|---|
-| `MIN_TCP_Z` | −0.05 m | `follow_april_tag.py`, `find_glasses.py` | Targets are clamped above this height (table guard) |
+| `MIN_TCP_Z` | −0.05 m | `follow_april_tag.py` (imported by the others) | Targets are clamped above this height (table guard). Jogging down slows near it and stops at it |
 | `MAX_TCP_Z` | 0.60 m | `safe_motion.py` (all active scripts) | Every script sends motion through `SafeControl`. A `moveL` target above it, or a `moveJ` whose arc goes above it, is refused (`MotionRefused`) before anything is sent. `speedL` (jogging, servoing) slows near it and cannot go up past it. Tasks more than 2 cm above it are aborted. Only the TCP is limited; also set a safety plane on the pendant |
+| Jog Z limit | `Z_LIMIT_GAIN` = 2 /s | `gamepad_jog.py` (`Jogger`, `limit_z_speed`), used by every script | Z jog speed ≤ gain × distance to the limit: slowdown starts 4 cm before it. Beyond a limit only the way back is allowed |
 | `MAX_OVERSHOOT` | 20 mm / 15 mm | tag picker / glass pick-place | The farthest a force-guarded push may go past the expected surface |
 | `CONTACT_FORCE` / `PLACE_FORCE` | 12 N / 10 N / 8 N | tag pick / glass pick / glass place | Descent stops above this force |
-| `CAMERA_TIMEOUT` / `FRAME_TIMEOUT` | 0.5 s | `follow_april_tag.py` / `find_glasses.py` | No new frame → `speedStop` / error (the `finally` stops the robot) |
+| `CAMERA_TIMEOUT` / `FRAME_TIMEOUT` | 0.5 s | `follow_april_tag.py` / `find_glasses.py` | No new frame → `speedStop` / error. `pick_place_glasses` then stops the robot and keeps running (recovers in place); `find_glasses` ends and its `finally` stops the robot |
 | `WATCHDOG_MIN_FREQUENCY` | 5 Hz | `robot_watchdog.py`, used by `pick_place_glasses`, `find_glasses`, `follow_april_tag`, `gamepad_robot_teleop` | The controller stops the control script if no RTDE input arrives for 0.2 s. The next loop iteration re-uploads it and aborts the task |
 | Manual override | – | all task-based scripts | Any stick input aborts the running task |
 | `speedL` time | 0.02 s | everywhere | Never 0. With `time=0` the control script spins and the robot protective-stops with **C271A1** |
@@ -459,7 +472,7 @@ The settings are module-level constants (UPPER_CASE, units in comments) at the t
 | Wrist camera index | `follow_april_tag.py` (`CAMERA_INDEX`) | `0` |
 | Overhead camera index | `find_glasses.py` (`OVERHEAD_CAMERA_INDEX`) | `2` |
 | AprilTag size (wrist picker, hand-eye) | `follow_april_tag.py` (`TAG_SIZE`) | 0.08 m |
-| Glass geometry | `find_glasses.py` (`RIM_HEIGHT`, `GLASS_MIN/MAX_DIAMETER`) | 0.075, 0.05–0.10 m |
+| Glass geometry | `find_glasses.py` (`RIM_HEIGHT`, `GLASS_MIN/MAX_DIAMETER`), `pick_place_glasses.py` (`GLASS_HEIGHT`) | 0.075, 0.05–0.10 m, 0.075 m |
 | Place tag | `pick_place_glasses.py` (`PLACE_TAG_ID`) | `None` = lowest id in view |
 | Motion speeds / forces | top of `pick_place_glasses.py`, `follow_april_tag.py`, `gamepad_jog.py` | see files |
 
@@ -474,10 +487,10 @@ To find COM ports: Device Manager → Ports, or `python -m serial.tools.list_por
 | Robot protective-stops with **C271A1 "Runtime is too much behind"** | `speedL` called with `time=0`. Always pass `SPEED_CMD_TIME` |
 | `RTDE control script is not running` | A protective stop, an e-stop, local mode or the watchdog killed the script. The watchdog-enabled scripts re-upload it by themselves (after the stop is cleared on the pendant); otherwise restart the script. Also make sure no PolyScope program is running |
 | "Robot control script stopped (main loop stalled?)" | The watchdog fired: the loop sent nothing for 0.2 s. Look for something blocking the loop (a slow camera, dragging the window) |
-| Wrong camera opens / "calibrated at … but camera gives …" | Windows renumbered the USB cameras. Change `CAMERA_INDEX` / `OVERHEAD_CAMERA_INDEX`. Check that the image is the one you expect before trusting the calibration |
-| Glass positions consistently off by a few mm to cm | Wrong `RIM_HEIGHT` for the kind of glass, the camera was bumped (redo step 3), or the TCP changed on the pendant |
+| Wrong camera opens / "calibrated at … but camera gives …" | Windows renumbered the USB cameras. Run `python calibrate_camera.py --list-cameras`: it shows every index with the role the scripts give it. Change `CAMERA_INDEX` / `OVERHEAD_CAMERA_INDEX` to match. Both cameras are 1280×720, so a swap is **not** detected otherwise: each camera silently uses the other's calibration |
+| Glass positions consistently off by a few mm to cm | Wrong `RIM_HEIGHT` (`GLASS_HEIGHT` in the pick-and-place demo) for the kind of glass, the camera was bumped (redo step 3), or the TCP changed on the pendant |
 | Tag "base" position drifts while jogging (wrist camera) | Bad `hand_eye.npz` or intrinsics. Redo steps 1–2, and check `TAG_SIZE` |
 | Circles on everything | Raise `roundness %` / `edge`, lower `max saturation`, shrink the detection area, use a dark matte mat |
-| Grip always times out | Check `python suction.py` and the COM port. `GRIP FAIL` means the seal never reached 180 hPa: the cup or glass surface is dirty or wet, or the approach is off-centre. If the vacuum was already on, `GRIP` is answered with `ERR BUSY` (see AUDIT.md) |
+| Grip always times out | Check `python suction.py` and the COM port. `GRIP FAIL` means the seal never reached 180 hPa: the cup or glass surface is dirty or wet, or the approach is off-centre. A `GRIP` while the vacuum is already on is answered with `ERR BUSY` and is harmless: the grip session and its last result stay as they are |
 | "Suction gripper not available, running without it" | `COM9` is missing, or the port is busy (a serial monitor is still open?) |
 | Gamepad does nothing | `No gamepad found, keyboard only` is printed at start. Plug it in before starting the script |

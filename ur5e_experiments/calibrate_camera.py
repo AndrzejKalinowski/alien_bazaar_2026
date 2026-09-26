@@ -34,7 +34,17 @@ Tip: measure across several squares and divide, e.g. 7 squares = 149.1 mm
 
 Uses the same CAMERA_INDEX / FRAME_WIDTH / FRAME_HEIGHT as follow_april_tag.py;
 the calibration is only valid for that resolution. For the overhead camera of
-find_glasses.py:  --camera 1 --output overhead_camera_calibration.npz
+find_glasses.py (OVERHEAD_CAMERA_INDEX, 2 at the time of writing):
+  --camera 2 --output overhead_camera_calibration.npz
+
+Which camera is which:
+  python calibrate_camera.py --list-cameras
+    shows one frame from every camera index 0..MAX_CAMERA_INDEX, labelled with
+    the role the scripts give it (wrist / overhead). Windows renumbers USB
+    cameras when they are re-plugged, and both cameras are 1280x720, so a swap
+    is not detected anywhere else: each camera would silently use the other's
+    calibration. Run this before a demo and fix CAMERA_INDEX /
+    OVERHEAD_CAMERA_INDEX if the pictures are in the wrong place.
 """
 
 import argparse
@@ -43,6 +53,7 @@ import os
 import cv2
 import numpy as np
 
+from find_glasses import OVERHEAD_CAMERA_INDEX
 from follow_april_tag import CALIBRATION_FILE, CAMERA_INDEX, FRAME_HEIGHT, FRAME_WIDTH
 
 # Default board layout, override with command line options (see above).
@@ -65,10 +76,15 @@ MIN_VIEWS = 10
 
 WINDOW = "camera calibration"
 
+MAX_CAMERA_INDEX = 5     # --list-cameras tries indices 0..this
+LIST_TILE_WIDTH = 640    # px, size of one camera's picture in the --list-cameras window
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Calibrate the webcam with a ChArUco board.")
     parser.add_argument("--print", action="store_true", help="write charuco_board.png and exit")
+    parser.add_argument("--list-cameras", action="store_true",
+                        help="show a frame from every camera index with its role, and exit")
     parser.add_argument("--cols", type=int, default=BOARD_COLS, help="squares across")
     parser.add_argument("--rows", type=int, default=BOARD_ROWS, help="squares down")
     parser.add_argument("--square", type=float, help="measured square size in mm")
@@ -118,6 +134,50 @@ def print_board(args):
           "Print it at 100% scale.")
 
 
+def list_cameras():
+    """One frame from every camera index, labelled with its role, in one window."""
+    roles = {CAMERA_INDEX: "wrist (follow_april_tag CAMERA_INDEX)",
+             OVERHEAD_CAMERA_INDEX: "overhead (find_glasses OVERHEAD_CAMERA_INDEX)"}
+    tile_size = (LIST_TILE_WIDTH, LIST_TILE_WIDTH * FRAME_HEIGHT // FRAME_WIDTH)
+    tiles = []
+    found = []
+    for index in range(MAX_CAMERA_INDEX + 1):
+        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+        frame = None
+        if cap.isOpened():
+            for _ in range(30):   # the first frames are often empty or dark
+                ok, frame = cap.read()
+                if ok:
+                    break
+            else:
+                frame = None
+        cap.release()
+        if frame is None:
+            continue
+        found.append(index)
+        label = f"{index}: {frame.shape[1]}x{frame.shape[0]}  {roles.get(index, 'unused')}"
+        print(label)
+        tile = cv2.resize(frame, tile_size)
+        cv2.putText(tile, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
+        cv2.putText(tile, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        tiles.append(tile)
+
+    for index, role in roles.items():
+        if index not in found:
+            print(f"WARNING: no picture from camera {index}, the {role.split()[0]} camera")
+    if not tiles:
+        print("No camera found")
+        return
+    if len(tiles) % 2:
+        tiles.append(np.zeros_like(tiles[0]))
+    grid = np.vstack([np.hstack(tiles[i:i + 2]) for i in range(0, len(tiles), 2)])
+    cv2.imshow("cameras (any key closes)", grid)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
 def calibrate(board, views, image_size, output):
     object_points, image_points = [], []
     for corners, ids in views:
@@ -146,6 +206,9 @@ def main():
     args = parse_args()
     if args.print:
         print_board(args)
+        return
+    if args.list_cameras:
+        list_cameras()
         return
 
     print(f"Board: {args.cols} x {args.rows} squares, square {args.square:.2f} mm, "

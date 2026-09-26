@@ -4,8 +4,9 @@ and put it down on an AprilTag lying on the table.
 
 Uses everything from find_glasses.py (camera calibration, detection area,
 colour filter, trackbars); the glasses stand upside down, so the circle seen
-from above is the foot and RIM_HEIGHT there must be the glass height (table to
-top of the foot), which is where the suction cup grabs.
+from above is the foot. GLASS_HEIGHT (table to top of the foot) is both the
+height of that circle for the detection and where the suction cup grabs; it is
+separate from find_glasses.RIM_HEIGHT, so tuning one script can't break the other.
 
 Sequence (p / gamepad Y):
   1. Measure the glasses and the place tag (averaged over several frames; the
@@ -67,16 +68,27 @@ All motion goes through safe_motion.py: the TCP never goes above MAX_TCP_Z
 
 The place tag (PLACE_TAG_ID, any 36h11 size) lies flat on the table inside
 the camera view; its last seen position is kept, since the placed glass covers
-it. It is shown as a cyan square in the video and on the map.
+it. It is shown as a cyan square in the video (with its id) and on the map.
+With PLACE_TAG_ID = None the lowest id in view is used; p warns when more
+than one tag is in view (e.g. a calibration tag left on the table).
 
 Motion watchdog (robot_watchdog.py): the robot stops by itself if the main
 loop sends nothing for 0.2 s (stalled loop, camera hang, breakpoint). The
 next loop iteration then re-uploads the control script and aborts the task.
 
+Faults are recovered in place, without restarting (which would also reset the
+gripper, 2 s): any error in the loop (a robot call failing after a protective
+stop, a lost RTDE connection, no camera frame for FRAME_TIMEOUT) stops all
+motion, aborts the task, prints the traceback and a WARNING, reconnects RTDE
+if needed and carries on. After a protective stop, clear it on the pendant;
+the control script is then re-uploaded by itself. Ctrl+C, q / Esc or closing
+the window still quit.
+
 Requires: pip install opencv-python ur_rtde pyserial numpy
 """
 
 import time
+import traceback
 
 import cv2
 import numpy as np
@@ -92,6 +104,7 @@ from suction import key_command
 
 PLACE_TAG_ID = None          # None = the lowest id in view
 PLACED_RADIUS = 0.04         # m, a glass this close to the tag already stands on it
+GLASS_HEIGHT = 0.075         # m, upside-down glass: table to top of the foot (seen circle, cup lands here)
 
 CARRY_CLEARANCE = 0.05       # m, gap under the carried glass over the other glasses
 APPROACH_GAP = 0.02          # m, stop this far above the foot / placing height, then go slowly
@@ -127,6 +140,7 @@ SPEED_CMD_TIME = 0.02        # s
 STOP_DECEL = 1.0             # m/s^2
 HOME_SPEED = 1.0
 HOME_ACCEL = 1.0
+RECONNECT_DELAY = 1.0        # s, wait after a failed reconnect before the loop retries
 
 GAMEPAD_KEYS = {"BTN_NORTH": "p", "BTN_SOUTH": "s", "BTN_EAST": "g",
                 "BTN_WEST": "r", "BTN_START": "h"}
@@ -194,6 +208,9 @@ class Task:
 
 class HomeTask(Task):
     def run(self):
+        home_z = self.c.getForwardKinematics(HOME_Q)[2]
+        if home_z > MAX_TCP_Z:
+            raise TaskFailed(f"home is above the ceiling ({home_z:.3f} > {MAX_TCP_Z:.3f} m), not moving")
         self.c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL, True)
         yield from self.wait_move("going home...")
         self.status = "home"
@@ -204,12 +221,12 @@ class HomeTask(Task):
 
 
 class PickPlaceTask(Task):
-    def __init__(self, r, c, suction, glass, place_xy, table_z, rim_height):
+    def __init__(self, r, c, suction, glass, place_xy, table_z, glass_height):
         self.suction = suction
         self.glass = glass
         self.place_xy = np.asarray(place_xy)
         self.table_z = table_z
-        self.rim_height = rim_height
+        self.glass_height = glass_height
         super().__init__(r, c)
 
     def move_to(self, xyz, label, holding=False, rotation=None, speed=MOVE_SPEED):
@@ -276,9 +293,9 @@ class PickPlaceTask(Task):
     def run(self):
         start = self.check_start()
         g = self.glass
-        foot_z = self.table_z + self.rim_height       # tip height on top of the glass
-        # The carried glass hangs rim_height below the tip, over glasses rim_height tall
-        carry_z = self.table_z + 2 * self.rim_height + CARRY_CLEARANCE
+        foot_z = self.table_z + self.glass_height       # tip height on top of the glass
+        # The carried glass hangs glass_height below the tip, over glasses glass_height tall
+        carry_z = self.table_z + 2 * self.glass_height + CARRY_CLEARANCE
         if carry_z > MAX_TCP_Z:
             raise TaskFailed(f"carry height {carry_z:.3f} m is above MAX_TCP_Z")
         tx, ty = self.place_xy
@@ -308,6 +325,30 @@ class PickPlaceTask(Task):
         yield from self.move_to([start[0], start[1], max(start[2], carry_z)], "back")
         yield from self.move_to(start[:3], "back")
         self.status = "placed"
+
+
+def recover(r, c, watchdog):
+    """After an exception in the main loop: stop all motion, reconnect what dropped out.
+
+    The control script itself is re-uploaded by watchdog.kick() on the next
+    frame, once the robot is not protective- or emergency-stopped any more.
+    """
+    for stop in (c.speedStop, c.stopL, c.stopJ):
+        try:
+            stop(STOP_DECEL)
+        except Exception:
+            pass
+    try:
+        if not r.isConnected():
+            print("RTDE receive connection lost, reconnecting")
+            r.reconnect()
+        if not c.isConnected():
+            print("RTDE control connection lost, reconnecting")
+            c.reconnect()
+            watchdog.arm()
+    except Exception as e:
+        print(f"Reconnect failed ({e}), retrying on the next error")
+        time.sleep(RECONNECT_DELAY)
 
 
 def side_rotation(direction, roll_deg):
@@ -367,8 +408,8 @@ class SidePickPlaceTask(PickPlaceTask):
             self.rotation = side_rotation(d, SIDE_ROLL_DEG)
 
         grip_z = self.table_z + SIDE_GRIP_HEIGHT
-        # The carried glass hangs SIDE_GRIP_HEIGHT below the tip, over glasses rim_height tall
-        carry_z = self.table_z + self.rim_height + SIDE_GRIP_HEIGHT + CARRY_CLEARANCE
+        # The carried glass hangs SIDE_GRIP_HEIGHT below the tip, over glasses glass_height tall
+        carry_z = self.table_z + self.glass_height + SIDE_GRIP_HEIGHT + CARRY_CLEARANCE
         if carry_z > MAX_TCP_Z:
             raise TaskFailed(f"carry height {carry_z:.3f} m is above MAX_TCP_Z")
         safe_z = max(start[2], carry_z)
@@ -412,14 +453,14 @@ class SidePickPlaceTask(PickPlaceTask):
 
 
 def find_place_tag(detector, finder, image):
-    """Base x, y of the place tag's center on the table, or None."""
+    """(base x, y of the place tag's center on the table, its id, all ids in view), or None."""
     centers = fg.tag_centers(detector, image)
     ids = [PLACE_TAG_ID] if PLACE_TAG_ID is not None else sorted(centers)
     for tag_id in ids:
         if tag_id in centers:
             p = fg.pixel_to_plane(finder.K, finder.T_base_cam, centers[tag_id], finder.table_z)
             if p is not None:
-                return p[:2]
+                return p[:2], tag_id, sorted(centers)
     return None
 
 
@@ -430,7 +471,7 @@ def choose_glass(glasses, place_xy):
     return min(free, key=lambda g: np.hypot(g.x - place_xy[0], g.y - place_xy[1]), default=None)
 
 
-def draw_place(image, finder, place_xy, seen):
+def draw_place(image, finder, place_xy, tag_id, seen):
     T_cam_base = np.linalg.inv(finder.T_base_cam)
     rvec, _ = cv2.Rodrigues(T_cam_base[:3, :3])
     point = np.array([[place_xy[0], place_xy[1], finder.table_z]])
@@ -438,13 +479,14 @@ def draw_place(image, finder, place_xy, seen):
     p = tuple(int(v) for v in pixel.ravel())
     color = (255, 255, 0) if seen else (160, 160, 0)
     cv2.drawMarker(image, p, color, cv2.MARKER_SQUARE, 30, 2)
-    cv2.putText(image, "place" if seen else "place (last seen)", (p[0] + 18, p[1] + 5),
+    label = f"place: tag {tag_id}" + ("" if seen else " (last seen)")
+    cv2.putText(image, label, (p[0] + 18, p[1] + 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
 
 def main():
     cap, width, height = fg.open_camera()
-    finder = fg.GlassFinder.load(width, height)
+    finder = fg.GlassFinder.load(width, height, rim_height=GLASS_HEIGHT)
     detector = fg.make_tag_detector()
     editor = fg.AreaEditor(finder)
     fg.setup_window(editor)
@@ -452,102 +494,116 @@ def main():
     suction = connect_suction()
     r, c = safe_motion.connect(IP)
     gamepad = GamepadControl(GAMEPAD_KEYS)
-    jogger = Jogger(c, gamepad)
+    jogger = Jogger(c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
     print("Connected to robot. TCP pose:", r.getActualTCPPose())
 
     task = None
     place_xy = None
+    place_id = None
+    tags_in_view = []
     status = "p: pick & place  s: stop  g/r: grip/release  h: home  q: quit"
     watchdog = RobotWatchdog(c)
     try:
         while True:
             if fg.window_closed():
                 break
-            fg.read_trackbars(finder)
-            image = finder.undistort(fg.read_frame(cap))
-            if not watchdog.kick():
-                if task is not None:
-                    task.abort()
-                    task = None
-                jogger.stop()
-                status = "robot was stopped (loop stall / protective stop), task aborted"
-            glasses = finder.detect(image)
-            seen = find_place_tag(detector, finder, image)
-            if seen is not None:
-                place_xy = seen
-            tcp = r.getActualTCPPose()
-
-            if task is not None:
-                task.update()
-                status = task.status
-                if task.done:
-                    task = None
-            # Backstop for moves that got above the ceiling anyway (safe_motion.py)
-            if task is not None and c.over_ceiling():
-                task.abort()
-                task = None
-                status = f"above the {MAX_TCP_Z:.2f} m ceiling, task stopped (jog down)"
-                print(status)
-
-            fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2], place_xy)
-            if place_xy is not None:
-                draw_place(image, finder, place_xy, seen is not None)
-            cv2.imshow(fg.WINDOW, image)
-
-            if gamepad.jog_speed() is not None and task is not None:
-                task.abort()
-                task = None
-                status = "manual override, task aborted"
-                print(status)
-            if task is None:
-                jogger.update()
-
-            keys = fg.read_keys(gamepad)
-            if "q" in keys or "\x1b" in keys:
-                break
-            for key in keys:
-                if key == "s":
+            try:
+                fg.read_trackbars(finder)
+                image = finder.undistort(fg.read_frame(cap))
+                if not watchdog.kick():
                     if task is not None:
                         task.abort()
                         task = None
                     jogger.stop()
-                    c.speedStop(STOP_DECEL)
-                    status = "stopped"
-                elif key == "g" and task is not None:
-                    # The pick task controls the vacuum and waits for its GRIP result
-                    status = warn("task running, g ignored (s stops the task)")
-                elif key in ("g", "r"):
-                    status = key_command(suction, key)
-                elif key == "o":
-                    pose = r.getActualTCPPose()
-                    rotation = ", ".join(f"{v:.5f}" for v in pose[3:])
-                    print(f"SIDE_GRIP_ROTATION = [{rotation}]\n"
-                          f"SIDE_GRIP_HEIGHT = {pose[2] - finder.table_z:.4f}")
-                    side = read_side_orientation(pose)
-                    if side is None:
-                        status = "o: tool not horizontal, only SIDE_GRIP_ROTATION printed"
-                    else:
-                        status = f"SIDE_APPROACH_YAW_DEG = {side[0]:.0f}  SIDE_ROLL_DEG = {side[1]:.0f}"
+                    status = "robot was stopped (loop stall / protective stop), task aborted"
+                glasses = finder.detect(image)
+                seen = find_place_tag(detector, finder, image)
+                if seen is not None:
+                    place_xy, place_id, tags_in_view = seen
+                tcp = r.getActualTCPPose()
+
+                if task is not None:
+                    task.update()
+                    status = task.status
+                    if task.done:
+                        task = None
+                # Backstop for moves that got above the ceiling anyway (safe_motion.py)
+                if task is not None and c.over_ceiling():
+                    task.abort()
+                    task = None
+                    status = warn(f"above the {MAX_TCP_Z:.2f} m ceiling, task stopped (jog down)")
+
+                fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2], place_xy)
+                if place_xy is not None:
+                    draw_place(image, finder, place_xy, place_id, seen is not None)
+                cv2.imshow(fg.WINDOW, image)
+
+                if gamepad.jog_speed() is not None and task is not None:
+                    task.abort()
+                    task = None
+                    status = "manual override, task aborted"
                     print(status)
-                elif key in ("h", "p") and task is not None:
-                    status = warn(f"task running ({task.status}), {key} ignored (s stops the task)")
-                elif key == "h":
-                    jogger.stop()
-                    task = HomeTask(r, c)
-                elif key == "p":
-                    jogger.stop()
-                    if place_xy is None:
-                        status = warn(f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} "
-                                      "in view, p ignored")
-                        continue
-                    status = "measuring..."
-                    glass = choose_glass(finder.measure(cap, kick=watchdog.kick), place_xy)
-                    if glass is None:
-                        status = warn("no glass found, p ignored")
-                        continue
-                    task_class = SidePickPlaceTask if PICK_FROM_SIDE else PickPlaceTask
-                    task = task_class(r, c, suction, glass, place_xy,
-                                      finder.table_z, fg.RIM_HEIGHT)
+                if task is None:
+                    jogger.update(tcp)
+
+                keys = fg.read_keys(gamepad)
+                if "q" in keys or "\x1b" in keys:
+                    break
+                for key in keys:
+                    if key == "s":
+                        if task is not None:
+                            task.abort()
+                            task = None
+                        jogger.stop()
+                        c.speedStop(STOP_DECEL)
+                        status = "stopped"
+                    elif key == "g" and task is not None:
+                        # The pick task controls the vacuum and waits for its GRIP result
+                        status = warn("task running, g ignored (s stops the task)")
+                    elif key in ("g", "r"):
+                        status = key_command(suction, key)
+                    elif key == "o":
+                        pose = r.getActualTCPPose()
+                        rotation = ", ".join(f"{v:.5f}" for v in pose[3:])
+                        print(f"SIDE_GRIP_ROTATION = [{rotation}]\n"
+                              f"SIDE_GRIP_HEIGHT = {pose[2] - finder.table_z:.4f}")
+                        side = read_side_orientation(pose)
+                        if side is None:
+                            status = "o: tool not horizontal, only SIDE_GRIP_ROTATION printed"
+                        else:
+                            status = f"SIDE_APPROACH_YAW_DEG = {side[0]:.0f}  SIDE_ROLL_DEG = {side[1]:.0f}"
+                        print(status)
+                    elif key in ("h", "p") and task is not None:
+                        status = warn(f"task running ({task.status}), {key} ignored (s stops the task)")
+                    elif key == "h":
+                        jogger.stop()
+                        task = HomeTask(r, c)
+                    elif key == "p":
+                        jogger.stop()
+                        if place_xy is None:
+                            status = warn(f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} "
+                                          "in view, p ignored")
+                            continue
+                        if PLACE_TAG_ID is None and len(tags_in_view) > 1:
+                            # Not refused: the id of the place tag is not fixed, so the lowest wins
+                            warn(f"tags {tags_in_view} in view, placing on the lowest id {place_id}")
+                        status = "measuring..."
+                        glass = choose_glass(finder.measure(cap, kick=watchdog.kick), place_xy)
+                        if glass is None:
+                            status = warn("no glass found, p ignored")
+                            continue
+                        task_class = SidePickPlaceTask if PICK_FROM_SIDE else PickPlaceTask
+                        task = task_class(r, c, suction, glass, place_xy,
+                                          finder.table_z, GLASS_HEIGHT)
+            except Exception as e:
+                # Robot fault, lost connection, camera hiccup...: stop and recover in
+                # place. Restarting would also cost the gripper's 2 s serial reset.
+                traceback.print_exc()
+                status = warn(f"error: {e} - stopped, recovering")
+                task = None
+                recover(r, c, watchdog)
+                if cv2.waitKey(1) & 0xFF in (ord("q"), 27):   # keep the window alive, allow quit
+                    break
     except KeyboardInterrupt:
         pass
     finally:

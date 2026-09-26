@@ -7,12 +7,17 @@ Stick mapping (same everywhere):
   hold RB         rotate instead of move (stick = rx / ry, triggers = rz)
   hold LB         fine mode, FINE_SCALE of the normal speed
 
+Z limits (the same in every script): the Z speed is capped to
+Z_LIMIT_GAIN * distance left to MAX_TCP_Z (up) / MIN_TCP_Z (down), so the
+tool slows down and stops at the ceiling and the table guard. Beyond a
+limit only the way back is allowed, so the operator can always jog out.
+
 Usage:
   gamepad = GamepadControl({"BTN_SOUTH": " ", "BTN_START": "h"})   # button -> key
-  jogger = Jogger(rtde_c, gamepad)
+  jogger = Jogger(rtde_c, gamepad, MIN_TCP_Z, MAX_TCP_Z)   # limits from follow_april_tag
   while True:
       for key in gamepad.poll_keys(): ...     # buttons pressed since the last call
-      jogger.update()                         # speedL from the sticks, stops when released
+      jogger.update(rtde_r.getActualTCPPose())   # speedL from the sticks, stops when released
   jogger.stop(); gamepad.close()
 
 Call update() at least every ~50 ms while jogging; before anything that blocks
@@ -31,12 +36,22 @@ FINE_SCALE = 0.2           # speed factor while LB is held
 SPEED_ACCEL = 0.4       # m/s^2 (or rad/s^2), smooths out stick changes
 SPEED_CMD_TIME = 0.02   # s, speedL command time
 STOP_DECEL = 1.0        # m/s^2 when the sticks are released
+# 1/s. At the max Z speed the slowdown starts 4 cm before a limit and needs
+# 0.16 m/s^2 of deceleration, well within SPEED_ACCEL, so the tool follows it.
+Z_LIMIT_GAIN = 2.0
 
 DEADZONE = 0.15
 
 
 def apply_deadzone(value):
     return value if abs(value) > DEADZONE else 0.0
+
+
+def limit_z_speed(speed, tcp_z, min_z, max_z):
+    """Cap the Z speed of a speedL vector near the Z limits (in place, also returned)."""
+    speed[2] = min(speed[2], max(0.0, Z_LIMIT_GAIN * (max_z - tcp_z)))
+    speed[2] = max(speed[2], min(0.0, -Z_LIMIT_GAIN * (tcp_z - min_z)))
+    return speed
 
 
 class GamepadControl:
@@ -91,15 +106,19 @@ class GamepadControl:
 class Jogger:
     """Sends speedL from the gamepad sticks, and speedStop once when they are released."""
 
-    def __init__(self, rtde_c, gamepad):
+    def __init__(self, rtde_c, gamepad, min_z, max_z):
+        """min_z / max_z: TCP Z limits in m (base frame), see limit_z_speed()."""
         self._c = rtde_c
         self._gamepad = gamepad
+        self._min_z = min_z
+        self._max_z = max_z
         self.jogging = False
 
-    def update(self, enabled=True):
-        """Call every loop. Returns True while jogging."""
+    def update(self, tcp_pose, enabled=True):
+        """Call every loop with the current TCP pose. Returns True while jogging."""
         speed = self._gamepad.jog_speed() if enabled else None
         if speed is not None:
+            limit_z_speed(speed, tcp_pose[2], self._min_z, self._max_z)
             self._c.speedL(speed, SPEED_ACCEL, SPEED_CMD_TIME)
             self.jogging = True
         elif self.jogging:

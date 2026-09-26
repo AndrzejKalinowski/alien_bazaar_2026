@@ -1,5 +1,6 @@
 import safe_motion
 from time import sleep, time
+from follow_april_tag import MAX_TCP_Z, MIN_TCP_Z
 from gamepad_jog import GamepadControl, Jogger
 from robot_watchdog import RobotWatchdog
 from suction import Suction, key_command
@@ -83,7 +84,7 @@ def main():
     suction = Suction()
 
     r, c = connect_rtde()
-    jogger = Jogger(c, gamepad)
+    jogger = Jogger(c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
     watchdog = RobotWatchdog(c)
     home_started = None   # time the home move started, None = not homing
 
@@ -98,6 +99,8 @@ def main():
 
                 if "h" in keys and home_started is not None:
                     print("WARNING: already going home, h ignored")
+                elif "h" in keys and c.getForwardKinematics(HOME_Q)[2] > MAX_TCP_Z:
+                    print(f"WARNING: home is above the ceiling (MAX_TCP_Z = {MAX_TCP_Z} m), h ignored")
                 elif "h" in keys:
                     print("Go home")
                     jogger.stop()
@@ -119,7 +122,7 @@ def main():
                     elif time() - home_started > 0.2 and c.getAsyncOperationProgress() < 0:
                         home_started = None
                 if home_started is None:
-                    jogger.update()
+                    jogger.update(r.getActualTCPPose())
                 sleep(LOOP_DT)
             except (KeyboardInterrupt, SystemExit):
                 raise
@@ -127,7 +130,7 @@ def main():
                 print(f"Robot error: {e}. Attempting to recover without restarting...")
                 sleep(ERROR_RETRY_DELAY)
                 r, c = recover_from_fault(r, c)
-                jogger = Jogger(c, gamepad)
+                jogger = Jogger(c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
                 watchdog = RobotWatchdog(c)   # the re-uploaded script has no watchdog
                 home_started = None
     except (KeyboardInterrupt, SystemExit):

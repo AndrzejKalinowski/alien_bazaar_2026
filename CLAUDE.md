@@ -22,7 +22,7 @@ Hackathon code (Alien Bazaar 2026, team Rabyte) for a **UR5e robot arm with a cu
   - `find_glasses.py`: `GlassFinder` (Hough circles + HSV rim filter + back-projection to base frame), `AreaEditor`, overhead-camera calibration (`--calibrate`). It is both a tool and a library.
   - `safe_motion.py`: `SafeControl`, the motion controller. It wraps `RTDEControlInterface` and enforces the `MAX_TCP_Z` ceiling on `moveL`, `moveJ` and `speedL`. Connect with `r, c = safe_motion.connect(IP)`, never with `rtde_control` directly.
   - `follow_april_tag.py`: wrist-camera tag picker **and the de facto shared module**: `IP`, `HOME_Q`, `MIN/MAX_TCP_Z`, `TAG_DICTIONARY`, `TAG_SIZE`, `pose_to_matrix`, `Camera`, `TagDetector`, `connect_suction`. Importing it has side effects (it loads `hand_eye.npz` and needs `ur_rtde`).
-  - `gamepad_jog.py`: `GamepadControl` (button → key edges, stick → speed vector), `Jogger`.
+  - `gamepad_jog.py`: `GamepadControl` (button → key edges, stick → speed vector), `Jogger` (needs the Z limits and the current TCP pose, so every script jogs with the same ceiling / floor guard), `limit_z_speed`.
   - `robot_watchdog.py`: `RobotWatchdog`, the RTDE watchdog that stops the robot when a main loop stalls.
   - `suction.py`: host driver for the gripper serial protocol.
   - `hand_eye_calibration.py`, `calibrate_camera.py`: calibration tools that write the `.npz` files.
@@ -41,12 +41,15 @@ pip install ur_rtde==1.6.5 opencv-python==5.0.0.93 numpy pyserial cobs inputs py
 # Offline syntax check of everything
 python -m compileall -q -x "\.venv" ur5e_experiments hoverboard_experiments
 
+# Offline tests (no hardware; about a second). pip install pytest pyflakes
+python -m pytest ur5e_experiments/tests hoverboard_experiments/tests
+
 # Firmware (from Gripper/)
 pio run                 # build
 pio run -t upload       # flash (user only)
 ```
 
-There are no tests yet. For robot logic without hardware, URSim can run in Docker/WSL (see [ur5e_experiments/README.md](ur5e_experiments/README.md)); point `IP` at `127.0.0.1`.
+The tests (`ur5e_experiments/tests`, `hoverboard_experiments/tests`) cover the pure functions (geometry, hand-eye, Z limits, packets, framing) and the drivers against fakes (suction controller, RTDE watchdog); `conftest.py` stubs `ur_rtde` and the gamepad libraries, and `test_static.py` runs pyflakes for undefined names over every script. Add a test with each fix. For robot logic without hardware, URSim can run in Docker/WSL (see [ur5e_experiments/README.md](ur5e_experiments/README.md)); point `IP` at `127.0.0.1`.
 
 ## Conventions (match these)
 
@@ -62,9 +65,9 @@ There are no tests yet. For robot logic without hardware, URSim can run in Docke
 
 ## Cross-file contracts (change together)
 
-- **Gripper serial protocol:** `Gripper/src/main.cpp` ↔ `ur5e_experiments/suction.py` ↔ `Gripper/README.md`. Timings that are mirrored in Python: `RELEASE_PULSE_MS` = 1500 ↔ `RELEASE_TIMEOUT`, and `RELEASE_TIME` in `pick_place_glasses.py`. `GRIP_CONFIRM_TIMEOUT_MS` = 8000 ↔ `GRIP_RESULT_TIMEOUT` and the tasks' `GRIP_CONFIRM_TIMEOUT` (6 s). The unsolicited `GRIP OK/FAIL/LOST/UNKNOWN` lines are parsed in `Suction._read_lines`.
+- **Gripper serial protocol:** `Gripper/src/main.cpp` ↔ `ur5e_experiments/suction.py` ↔ `Gripper/README.md`. Timings that are mirrored in Python: `RELEASE_PULSE_MS` = 1500 ↔ `RELEASE_TIMEOUT`, and `RELEASE_TIME` in `pick_place_glasses.py`. `GRIP_CONFIRM_TIMEOUT_MS` = 8000 ↔ `GRIP_RESULT_TIMEOUT` and the tasks' `GRIP_CONFIRM_TIMEOUT` (6 s). `GRIP UNKNOWN` also comes mid-grip when the sensor fails (`SENSOR_LOST_MS` = 500). The unsolicited `GRIP OK/FAIL/LOST/UNKNOWN` lines are parsed in `Suction._read_lines`.
 - **Calibration files** (all 1280×720, all relative to the TCP set on the pendant at the suction-cup tip): the `camera_calibration.npz` and `overhead_camera_calibration.npz` keys `camera_matrix`, `dist_coeffs`, `image_size`; the `hand_eye.npz` key `T_tcp_cam`; the `overhead_camera_pose.npz` keys `T_base_cam`, `table_z`, `image_size`, `pixels`, `base_points`. Do not change these keys without updating every reader.
-- **`find_glasses.py` is imported by `pick_place_glasses.py`** (`fg.setup_window`, `fg.read_trackbars`, `fg.draw_overlay`, `fg.RIM_HEIGHT`, `GlassFinder`, `AreaEditor`, `tag_centers`, `pixel_to_plane`). Keep those names stable.
+- **`find_glasses.py` is imported by `pick_place_glasses.py`** (`fg.setup_window`, `fg.read_trackbars`, `fg.draw_overlay`, `fg.read_frame`, `GlassFinder` (`load(width, height, rim_height=...)`), `AreaEditor`, `tag_centers`, `pixel_to_plane`). Keep those names stable.
 - **`follow_april_tag.py` constants are imported by 4 scripts.** Renaming them breaks the others.
 
 ## Don't
