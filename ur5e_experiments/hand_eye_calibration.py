@@ -24,9 +24,8 @@ import time
 
 import cv2
 import numpy as np
-import rtde_control
-import rtde_receive
 
+import safe_motion
 from follow_april_tag import HAND_EYE_FILE, IP, TAG_SIZE, Camera, TagDetector, pose_to_matrix
 
 MOVE_SPEED = 0.05        # m/s
@@ -219,8 +218,7 @@ def describe(X):
 def main():
     camera = Camera()
     detector = TagDetector(camera.camera_matrix, camera.dist_coeffs)
-    r = rtde_receive.RTDEReceiveInterface(IP)
-    c = rtde_control.RTDEControlInterface(IP)
+    r, c = safe_motion.connect(IP)
 
     try:
         # Wait for the user to confirm, with a tag in view

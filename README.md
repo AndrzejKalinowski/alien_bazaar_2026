@@ -445,7 +445,7 @@ These are software guards, **not** a replacement for the UR safety configuration
 | Guard | Value | Where | Effect |
 |---|---|---|---|
 | `MIN_TCP_Z` | −0.05 m | `follow_april_tag.py` (imported by the others) | Targets are clamped above this height (table guard). Jogging down slows near it and stops at it |
-| `MAX_TCP_Z` | 0.60 m | `follow_april_tag.py` (imported by the others) | Targets are clamped below it. Jogging up slows near it and stops at it. A task more than 2 cm above it (`CEILING_MARGIN`) is aborted, and home is refused if it is above the ceiling (`follow_april_tag`, `pick_place_glasses`, teleop) |
+| `MAX_TCP_Z` | 0.60 m | `safe_motion.py` (all active scripts) | Every script sends motion through `SafeControl`. A `moveL` target above it, or a `moveJ` whose arc goes above it, is refused (`MotionRefused`) before anything is sent. `speedL` (jogging, servoing) slows near it and cannot go up past it. Tasks more than 2 cm above it are aborted. Only the TCP is limited; also set a safety plane on the pendant |
 | Jog Z limit | `Z_LIMIT_GAIN` = 2 /s | `gamepad_jog.py` (`Jogger`, `limit_z_speed`), used by every script | Z jog speed ≤ gain × distance to the limit: slowdown starts 4 cm before it. Beyond a limit only the way back is allowed |
 | `MAX_OVERSHOOT` | 20 mm / 15 mm | tag picker / glass pick-place | The farthest a force-guarded push may go past the expected surface |
 | `CONTACT_FORCE` / `PLACE_FORCE` | 12 N / 10 N / 8 N | tag pick / glass pick / glass place | Descent stops above this force |

@@ -112,6 +112,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+import safe_motion
 from follow_april_tag import IP, MAX_TCP_Z, MIN_TCP_Z, TAG_DICTIONARY, pose_to_matrix
 from gamepad_jog import GamepadControl, Jogger
 from robot_watchdog import RobotWatchdog
@@ -825,11 +826,7 @@ def load_progress(width, height, fresh):
 
 
 def calibrate(args):
-    import rtde_control
-    import rtde_receive
-
-    rtde_r = rtde_receive.RTDEReceiveInterface(IP)
-    rtde_c = rtde_control.RTDEControlInterface(IP)
+    rtde_r, rtde_c = safe_motion.connect(IP)
     gamepad = GamepadControl(CALIBRATE_GAMEPAD_KEYS)
     jogger = Jogger(rtde_c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
     cap, width, height = open_camera()
@@ -941,10 +938,7 @@ def run(args):
 
     rtde_c = rtde_r = gamepad = jogger = None
     if args.robot:
-        import rtde_control
-        import rtde_receive
-        rtde_r = rtde_receive.RTDEReceiveInterface(IP)
-        rtde_c = rtde_control.RTDEControlInterface(IP)
+        rtde_r, rtde_c = safe_motion.connect(IP)
         gamepad = GamepadControl(RUN_GAMEPAD_KEYS)
         jogger = Jogger(rtde_c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
 

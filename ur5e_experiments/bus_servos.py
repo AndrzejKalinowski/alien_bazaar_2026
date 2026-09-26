@@ -36,6 +36,8 @@ Standalone test (see --help for all commands):
     python bus_servos.py rotate 1 -450       # relative angle, multi-turn
     python bus_servos.py spin 1 800 --time 3 # steps/s, negative = reverse
     python bus_servos.py spray 2 --count 5
+    python bus_servos.py watch 1             # torque off, print position while
+                                             # you turn it by hand (--hold, --keep-torque)
     python bus_servos.py demo                # interactive: both servos
 
 Requires: pip install pyserial
@@ -56,11 +58,11 @@ SPRAYER_ID = 1
 DEFAULT_SPEED = 1500       # steps/s (4096 steps per turn, ST3215 max ~3400)
 DEFAULT_ACCELERATION = 50  # units of 100 steps/s^2, 0 = maximum
 
-SPRAYER_REST_DEG = 180.0   # servo angle with the pump released
-SPRAYER_PRESS_DEG = 220.0  # servo angle with the pump pressed
+SPRAYER_REST_DEG = 280.0   # servo angle with the pump released
+SPRAYER_PRESS_DEG = 256.0  # servo angle with the pump pressed
 SPRAY_PERIOD = 2.0         # seconds between the starts of two strokes
 SPRAY_HOLD = 0.2           # seconds to hold the pump pressed
-SPRAYER_SPEED = 2500
+SPRAYER_SPEED = 5500
 
 STEPS_PER_REV = 4096
 BROADCAST_ID = 0xFE
@@ -378,6 +380,36 @@ class Sprayer:
         self.rest()
 
 
+def _watch(bus, ids, interval, keep_torque, hold):
+    """Print the positions of `ids` until Ctrl+C, e.g. to find the angles for
+    SPRAYER_REST_DEG / SPRAYER_PRESS_DEG by turning the servo by hand."""
+    servos = [BusServo(bus, servo_id) for servo_id in ids]
+    if not keep_torque:
+        for servo in servos:
+            servo.torque(False)
+    print("Turn the servos by hand, Ctrl+C to stop.")
+    try:
+        while True:
+            parts = []
+            for servo in servos:
+                try:
+                    steps = servo.position()
+                    parts.append(f"ID {servo.id}: {steps:5d} steps {steps * 360 / STEPS_PER_REV:6.1f} deg")
+                except (TimeoutError, ServoError) as e:
+                    parts.append(f"ID {servo.id}: {e}")
+            print("\r" + "   ".join(parts) + "   ", end="", flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        if hold:
+            for servo in servos:
+                # Set the goal to where it is now first, otherwise torque on
+                # would snap it back to the last commanded goal.
+                servo.move_to_steps(servo.position())
+                servo.torque(True)
+
+
 def _demo(bus):
     rotator = BusServo(bus, ROTATOR_ID)
     sprayer = Sprayer(BusServo(bus, SPRAYER_ID))
@@ -459,6 +491,13 @@ def main():
     p.add_argument("old_id", type=int)
     p.add_argument("new_id", type=int)
 
+    p = sub.add_parser("watch", help="torque off, print positions while you turn servos by hand")
+    p.add_argument("ids", type=int, nargs="*", default=[ROTATOR_ID, SPRAYER_ID])
+    p.add_argument("--interval", type=float, default=0.1, help="seconds between readings")
+    p.add_argument("--keep-torque", action="store_true", help="don't switch torque off")
+    p.add_argument("--hold", action="store_true",
+                   help="on exit, hold the position the servo was left at (torque on)")
+
     sub.add_parser("demo", help="interactive test of rotator + sprayer")
     args = parser.parse_args()
 
@@ -499,6 +538,8 @@ def main():
                 raise SystemExit(f"no servo with ID {args.old_id}")
             bus.set_id(args.old_id, args.new_id)
             print("OK" if bus.ping(args.new_id) else "servo does not answer to the new ID")
+        elif args.command == "watch":
+            _watch(bus, args.ids, args.interval, args.keep_torque, args.hold)
         elif args.command == "demo":
             _demo(bus)
 

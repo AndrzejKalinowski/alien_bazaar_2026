@@ -1,4 +1,4 @@
-import rtde_control, rtde_receive
+import safe_motion
 from time import sleep, time
 from follow_april_tag import MAX_TCP_Z, MIN_TCP_Z
 from gamepad_jog import GamepadControl, Jogger
@@ -24,8 +24,7 @@ GAMEPAD_KEYS = {"BTN_START": "h", "BTN_EAST": "g", "BTN_WEST": "r"}
 def connect_rtde():
     while True:
         try:
-            r = rtde_receive.RTDEReceiveInterface(IP)
-            c = rtde_control.RTDEControlInterface(IP)
+            r, c = safe_motion.connect(IP)   # jogging stops under the ceiling
             print("Connected to robot. TCP pose:", r.getActualTCPPose())
             return r, c
         except Exception as e:
