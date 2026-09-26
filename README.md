@@ -92,7 +92,7 @@ alien_bazaar_2026/
 │   ├── gamepad_jog.py                 gamepad → speedL jogging helper (used by the others)
 │   ├── suction.py                     host driver for the gripper serial protocol
 │   ├── bus_servos.py                  Feetech/Waveshare STS bus servos: rotator + sprayer
-│   ├── gamepad_robot_teleop.py        plain gamepad teleop with auto fault recovery (see AUDIT: broken)
+│   ├── gamepad_robot_teleop.py        plain gamepad teleop with auto fault recovery
 │   ├── gamepad_robot_move.py          early experiment (blocking moveL), legacy
 │   ├── move_robot.py                  first RTDE hello-world (URSim at 127.0.0.1), legacy
 │   ├── charuco_board.png              printable calibration board
@@ -313,7 +313,7 @@ Tags lying flat, tilted or on vertical faces all work, up to `MAX_TILT_DEG = 100
 |---|---|---|
 | `suction.py` | `python suction.py` | Self-test: status, pressure, grip-and-wait, hold, release |
 | `bus_servos.py` | `python bus_servos.py --port COM10 scan` / `demo` / … | See [§11](#11-bus-servos-rotator-and-sprayer) |
-| `gamepad_robot_teleop.py` | `python gamepad_robot_teleop.py` | Gamepad jog + grip/release + home, with automatic recovery after protective stops. **Currently crashes on start**, see AUDIT.md #1 |
+| `gamepad_robot_teleop.py` | `python gamepad_robot_teleop.py` | Gamepad jog + grip/release + home, with automatic recovery after protective stops. |
 | `gamepad_robot_move.py`, `move_robot.py` | – | Early experiments, kept for reference |
 
 ---
