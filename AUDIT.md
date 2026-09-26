@@ -72,7 +72,7 @@ In `find_glasses.py` it is the height of the circle seen for *upright* glasses. 
 **11. The saved detection settings effectively disable the colour filter** *Checked on branch `fix/audit`: not a bug, no change.*
 `detection_settings.json` has `"max saturation": 211` (the code default is 60), so almost nothing is rejected for colour. But it also has `"min brightness": 139` (default 0 = off), which this item first missed: circles must have a bright rim, which is how glass rims look. So the filtering was moved from colour to brightness, most likely on purpose for the current glasses and lighting. The file is runtime tuning data and was left as it is. Re-check both trackbars on the demo table (the `S.. V..` values next to each circle).
 
-**12. `bus_servos.py` docs contradict the servo ID constants**
+**12. `bus_servos.py` docs contradict the servo ID constants** *Fixed on branch `fix/audit`: docs follow the constants (rotator 2, sprayer 1).*
 The constants are `ROTATOR_ID = 2` and `SPRAYER_ID = 1`, but the docstring says "give the sprayer its own ID first: `set-id 1 2`" and the usage example builds `rotator = BusServo(bus, 1)`, `sprayer = … BusServo(bus, 2)`. Following the docstring gives the servos the wrong roles.
 
 **13. `pick_place_glasses.py` has no recovery after a robot fault**

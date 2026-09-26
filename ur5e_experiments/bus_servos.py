@@ -14,14 +14,15 @@ Two servos share the bus:
   * the sprayer (SPRAYER_ID) moves back and forth between a rest and a press
     angle every SPRAY_PERIOD seconds to work a pump/sprayer (background thread).
 
-New servos all ship with ID 1, so connect them one at a time and give the
-sprayer its own ID first:   python bus_servos.py set-id 1 2
+New servos all ship with ID 1, which is SPRAYER_ID. So connect only the
+rotator first and give it ROTATOR_ID:   python bus_servos.py set-id 1 2
+then connect the sprayer, which keeps ID 1.
 
 Use as a module:
     from bus_servos import ServoBus, BusServo, Sprayer
     bus = ServoBus("COM10")
-    rotator = BusServo(bus, 1)
-    sprayer = Sprayer(BusServo(bus, 2))
+    rotator = BusServo(bus, ROTATOR_ID)             # 2
+    sprayer = Sprayer(BusServo(bus, SPRAYER_ID))    # 1
     sprayer.start()
     rotator.rotate_by(90)
     ...

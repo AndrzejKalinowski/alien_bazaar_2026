@@ -403,14 +403,14 @@ s.release(wait=True)
 
 ```powershell
 python bus_servos.py --port COM10 scan
-python bus_servos.py set-id 1 2          # new servos all ship as ID 1 — connect one at a time
+python bus_servos.py set-id 1 2          # new servos ship as ID 1: connect only the rotator, make it ID 2
 python bus_servos.py info 1
 python bus_servos.py rotate 2 -450
 python bus_servos.py spray 1 --count 5
 python bus_servos.py demo
 ```
 
-Current constants: `ROTATOR_ID = 2`, `SPRAYER_ID = 1`. The module docstring example uses the opposite IDs (see AUDIT.md).
+Constants: `ROTATOR_ID = 2`, `SPRAYER_ID = 1`. New servos ship as ID 1, so only the rotator needs `set-id`; the sprayer keeps ID 1.
 
 ---
 
