@@ -21,7 +21,7 @@ For **tomorrow's demo**, do items 1–4 and the "demo hardening" list at the end
 ### High
 
 **1. `gamepad_robot_teleop.py` crashes on start: `NameError: GAMEPAD_KEYS`**
-[ur5e_experiments/gamepad_robot_teleop.py:84](ur5e_experiments/gamepad_robot_teleop.py#L84). The uncommitted refactor to `GamepadControl` removed the old button handling but never defined the key map. `DEADZONE` / `apply_deadzone` are now unused too.
+[ur5e_experiments/gamepad_robot_teleop.py:84](ur5e_experiments/gamepad_robot_teleop.py#L84). The uncommitted refactor to `GamepadControl` removed the old button handling but never defined the key map. `DEADZONE` / `apply_deadzone` are now unused too. *Fixed on branch `fix/audit`.*
 *Fix:* add `GAMEPAD_KEYS = {"BTN_START": "h", "BTN_EAST": "g", "BTN_WEST": "r"}` (the old behaviour) and delete the dead helpers.
 
 **2. No motion watchdog: if the Python loop stalls, the robot keeps moving**

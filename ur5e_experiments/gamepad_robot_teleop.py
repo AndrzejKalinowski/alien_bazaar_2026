@@ -12,14 +12,11 @@ LOOP_DT = 0.02          # seconds per control loop tick
 HOME_SPEED = 1.0
 HOME_ACCEL = 1.0
 
-DEADZONE = 0.15
-
 RECONNECT_DELAY = 1.0   # seconds to wait between reconnect attempts
 ERROR_RETRY_DELAY = 0.5  # seconds to wait after a non-connection error
 
-
-def apply_deadzone(value):
-    return value if abs(value) > DEADZONE else 0.0
+# Gamepad button -> key character: START = home, B = grip, X = release.
+GAMEPAD_KEYS = {"BTN_START": "h", "BTN_EAST": "g", "BTN_WEST": "r"}
 
 
 def connect_rtde():
