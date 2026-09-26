@@ -22,6 +22,9 @@ How it works:
   camera by  (distance from that point) * (height error) / (camera height).
   E.g. camera 1 m up, glass 40 cm off-center, 1 cm height error -> 4 mm error.
 
+  That is the classic mode. The diff mode (below) finds glasses only where the
+  table differs from the empty table, and tells upright from upside-down ones.
+
 Calibration (where the camera is relative to the robot):
   python find_glasses.py --calibrate
   Uses AprilTags (36h11, any size) lying in the work area as reference points:
@@ -48,9 +51,14 @@ Calibration (where the camera is relative to the robot):
 Detection mode:
   python find_glasses.py [--robot]
     p      measure glasses over several frames and print their base positions
+           (and orientation / other objects in diff mode)
     m      (--robot) move the suction tip HOVER_CHECK above the glass nearest
            to the image center, to check the calibration
     s      stop robot motion
+    b      capture the empty table (diff mode); clear the table and move the
+           robot out of view first, everything in view becomes "the table"
+    d      switch between diff and classic mode
+    v      show / hide the change mask (magenta)
     q/Esc  quit
   With --robot the gamepad jogs the robot too; buttons: X = p, Y = m, A = s,
   B = t (add the tip position as an area corner).
@@ -92,15 +100,39 @@ Detection area:
   coordinates: robot base (+X red, +Y green), camera view on the table (gray),
   detection area (magenta), glasses (green) and, with --robot, the tip (yellow).
 
+Diff mode (table_background.py, glass_classifier.py):
+  With the table empty press b once: the empty table is saved to
+  table_background.npz and used from then on (until the overhead camera is
+  calibrated again). Each frame is compared with it (brightness, colour and
+  texture, corrected for the webcam's auto exposure; shadows ignored), and
+  only the changed blobs are searched for circles, so edges in the mat, tape
+  and tags no longer make glasses. The "diff" trackbar is the change
+  threshold in noise sigmas: raise it if the mat shows specks, lower it if
+  glasses are not filled in (v shows the mask).
+  The glasses are modelled as truncated cones, RIM_HEIGHT tall, with
+  GLASS_MOUTH_DIAMETER / GLASS_FOOT_DIAMETER ends (measure yours). Both
+  circles seen of a glass are back-projected onto the height they would have
+  if it stood upright and if it stood upside down; only one way puts them on
+  one axis with the right sizes. Glasses are drawn by orientation: DOWN green,
+  UP blue, "?" orange (undecided, mostly right under the camera where
+  parallax is gone; not picked). Changes that are not glasses are drawn gray
+  ("unknown") or red ("obstruction": touching the image border or big, e.g.
+  the robot arm or a hand). While an obstruction is in view the background
+  stops adapting to the light. When most of the area changed, or the
+  exposure is way off, the background is STALE (red text) and nothing is
+  reported: clear the table and press b again.
+  Without a background the classic mode below runs as before.
+
 For use from other scripts:
-  finder = GlassFinder.load(rim_height=0.075)   # height of the circle you see
-  glasses = finder.measure(cap)   # list of Glass(x, y, z, diameter, pixel)
+  finder = GlassFinder.load(rim_height=0.075, mouth_diameter=0.08, foot_diameter=0.06)
+  glasses = finder.measure(cap)   # list of Glass(x, y, z, diameter, pixel, ..., orientation)
+  finder.objects                  # diff mode: non-glass things in the last frame
 
 Tips: glasses are transparent, so give them contrast: a dark matte mat on the
 table and diffuse light from above/side makes the rims show as bright rings.
 Mount the camera looking straight down, above the middle of the work area.
 
-Requires: pip install opencv-python ur_rtde
+Requires: pip install opencv-python numpy ur_rtde
 """
 
 import argparse
@@ -112,7 +144,9 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+import glass_classifier as gc
 import safe_motion
+import table_background as tb
 from follow_april_tag import IP, MAX_TCP_Z, MIN_TCP_Z, TAG_DICTIONARY, pose_to_matrix
 from gamepad_jog import GamepadControl, Jogger
 from robot_watchdog import RobotWatchdog
@@ -136,9 +170,13 @@ SETTINGS_FILE = os.path.join(HERE, "detection_settings.json")
 TABLE_Z = None               # m in base frame, None = take it from the calibration
 RIM_HEIGHT = 0.075            # m above the table of the circle seen from above (this tool's default;
                              # pick_place_glasses.py passes its own GLASS_HEIGHT to GlassFinder.load)
-GLASS_MIN_DIAMETER = 0.05    # m
-GLASS_MAX_DIAMETER = 0.10    # m
+GLASS_MIN_DIAMETER = 0.05    # m (classic mode)
+GLASS_MAX_DIAMETER = 0.10    # m (classic mode)
 RADIUS_MARGIN = 0.15         # widen the pixel radius range by this fraction
+# Diff mode: the glass as a truncated cone, RIM_HEIGHT tall (measure your glasses;
+# pick_place_glasses.py passes its own)
+GLASS_MOUTH_DIAMETER = 0.080  # m, open end
+GLASS_FOOT_DIAMETER = 0.060   # m, closed end
 
 EDGE_THRESHOLD = 150         # Canny high threshold for HoughCircles, trackbar
 ROUNDNESS = 80               # %, how perfect a circle must be (param2 of HOUGH_GRADIENT_ALT), trackbar
@@ -151,6 +189,14 @@ RIM_FRACTION = 0.25          # the rim must cover this fraction of that ring to 
 
 MEASURE_FRAMES = 15          # frames averaged by measure()
 MIN_SEEN_FRACTION = 0.5      # a glass must be found in this fraction of those frames
+ORIENTATION_AGREEMENT = 0.7  # diff mode: this fraction of its detections must agree on up / down
+
+CLASSIC = "classic"          # detection modes (d switches): Hough circles on the whole image
+DIFF = "diff"                # only where the table differs from the empty one, with orientation
+DIFF_KEYS = ("b", "d", "v")  # handled by diff_key()
+
+ORIENTATION_COLORS = {gc.DOWN: (0, 255, 0), gc.UP: (255, 200, 0), gc.UNSURE: (0, 200, 255)}   # BGR
+OBJECT_COLORS = {"unknown": (200, 200, 200), "obstruction": (0, 0, 255)}
 
 # --- calibration ------------------------------------------------------------
 
@@ -305,23 +351,42 @@ class Glass:
     pixel: tuple      # (u, v, r) in the undistorted image
     saturation: float = 0.0   # median HSV saturation along the rim, 0-255
     brightness: float = 0.0   # median HSV value along the rim, 0-255
+    orientation: str = None   # diff mode: "up", "down" or "?" (undecided); None = classic mode
+    margin: float = 0.0       # diff mode: how much worse the other orientation fits (chi2)
+    outline: object = None    # diff mode: (N, 2) px, predicted outline of the whole glass
 
 
 class GlassFinder:
-    def __init__(self, K, T_base_cam, table_z, width, height, rim_height=RIM_HEIGHT):
-        """rim_height: m above the table of the circle seen from above."""
+    def __init__(self, K, T_base_cam, table_z, width, height, rim_height=RIM_HEIGHT,
+                 mouth_diameter=GLASS_MOUTH_DIAMETER, foot_diameter=GLASS_FOOT_DIAMETER):
+        """rim_height: m above the table of the circle seen from above (in diff mode the
+        glass height); mouth / foot_diameter: m, the glass ends (diff mode)."""
         self.K = K
         self.T_base_cam = T_base_cam
         self.table_z = table_z
         self.rim_z = table_z + rim_height
+        self.size = (width, height)
         self.undistort = Undistorter(width, height)
         settings = load_settings()
         self.edge_threshold = settings["edge"]
         self.roundness = settings["roundness %"] / 100
         self.max_saturation = settings["max saturation"]
         self.min_brightness = settings["min brightness"]
+        self.diff_threshold = settings["diff"]
         self.rejected = []   # (u, v, r, reason) from the last detect(), for display
         self.area = load_area()   # (N, 2) base x, y polygon, or None = everywhere
+
+        # Diff mode (table_background.py + glass_classifier.py)
+        self.shape = gc.GlassShape(rim_height, mouth_diameter, foot_diameter)
+        self.cam = gc.TableCamera(K, T_base_cam, table_z)
+        self.background = tb.TableBackground.load(self.size, T_base_cam)
+        self.mode = DIFF if self.background else CLASSIC
+        self.change = None       # table_background.Change of the last detect() in diff mode
+        self.objects = []        # glass_classifier.TableObject of the last detect() in the area
+        self.show_mask = False   # draw the change mask (v)
+        self._adapt = True       # background may follow the frame (not while an obstruction is seen)
+        print(f"Detection mode: {self.mode}"
+              + ("" if self.background else " (no table background yet, b captures it)"))
 
         # Expected radius in pixels from the depth of the rim plane at the image center
         center = pixel_to_plane(K, T_base_cam, (width / 2, height / 2), self.rim_z)
@@ -335,7 +400,8 @@ class GlassFinder:
         print(f"Camera {depth:.2f} m above the rims, glass radius {self.min_radius}-{self.max_radius} px")
 
     @classmethod
-    def load(cls, width=FRAME_WIDTH, height=FRAME_HEIGHT, rim_height=RIM_HEIGHT):
+    def load(cls, width=FRAME_WIDTH, height=FRAME_HEIGHT, rim_height=RIM_HEIGHT,
+             mouth_diameter=GLASS_MOUTH_DIAMETER, foot_diameter=GLASS_FOOT_DIAMETER):
         if not os.path.exists(POSE_FILE):
             raise RuntimeError(f"No {POSE_FILE}, run: python find_glasses.py --calibrate")
         data = np.load(POSE_FILE)
@@ -344,11 +410,16 @@ class GlassFinder:
                                f"camera gives {(width, height)}")
         table_z = float(data["table_z"]) if TABLE_Z is None else TABLE_Z
         K = Undistorter(width, height).K
-        return cls(K, data["T_base_cam"], table_z, width, height, rim_height)
+        return cls(K, data["T_base_cam"], table_z, width, height, rim_height,
+                   mouth_diameter, foot_diameter)
 
     def detect(self, undistorted):
         """Glasses in one undistorted frame."""
         self.rejected = []   # before the early return, or the last frame's stay on screen
+        if self.mode == DIFF and self.background:
+            return self._detect_diff(undistorted)
+        self.change = None
+        self.objects = []
         gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
         gray = cv2.medianBlur(gray, BLUR)
         circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT_ALT, dp=1.5,
@@ -386,6 +457,55 @@ class GlassFinder:
             if all(np.hypot(u - k.pixel[0], v - k.pixel[1]) > k.pixel[2] for k in glasses):
                 glasses.append(g)
         return glasses
+
+    def _detect_diff(self, undistorted):
+        """Glasses (with orientation) where the table differs from the empty one."""
+        self.background.threshold = self.diff_threshold
+        area_pixels = self.area_pixels() if self.area is not None else None
+        self.change = self.background.compare(undistorted, area_pixels, adapt=self._adapt)
+        if self.change.stale:
+            self.objects = []
+            return []
+        found, objects = gc.classify(undistorted, self.change.mask, self.cam, self.shape,
+                                     self.edge_threshold, self.roundness)
+        self.objects = [o for o in objects if self._object_in_area(o)]
+        # Nothing big may slowly become background (the robot parked in view)
+        self._adapt = not any(o.label == "obstruction" for o in objects)
+        hsv = cv2.cvtColor(undistorted, cv2.COLOR_BGR2HSV)
+        glasses = []
+        for g in found:
+            if not self.in_area(g.xy):
+                continue
+            saturation, brightness = ring_color(hsv, *g.top_pixel)
+            glasses.append(Glass(float(g.xy[0]), float(g.xy[1]), self.rim_z, g.top_diameter,
+                                 g.top_pixel, saturation, brightness, g.orientation, g.margin,
+                                 g.outline))
+        return glasses
+
+    def _object_in_area(self, obj):
+        if self.area is None:
+            return True
+        # Any part of it: an arm reaching in from outside counts
+        step = max(len(obj.table_contour) // 32, 1)
+        return any(self.in_area(p) for p in obj.table_contour[::step])
+
+    def capture_background(self, cap, kick=None):
+        """Remember the empty table (robot out of view!) and switch to diff mode; ~1 s."""
+        self.background = tb.TableBackground.capture(lambda: self.undistort(read_frame(cap)),
+                                                     self.size, self.T_base_cam, kick=kick)
+        self.background.save()
+        self.mode = DIFF
+        self._adapt = True
+        print(f"Table background saved to {tb.BACKGROUND_FILE}")
+
+    def background_status(self):
+        """Short text for the window: mode and whether the background can be trusted."""
+        if self.mode == CLASSIC:
+            return "classic (Hough)" + ("" if self.background else ", b: capture empty table")
+        if self.change is not None and self.change.stale:
+            return (f"diff: BACKGROUND STALE ({self.change.changed_fraction:.0%} changed, "
+                    f"gain {self.change.gain:.2f}), clear the table and press b")
+        return "diff" + (f", gain {self.change.gain:.2f}" if self.change else "")
 
     def in_area(self, xy):
         if self.area is None:
@@ -428,8 +548,24 @@ class GlassFinder:
             m = lambda attr: float(np.median([getattr(g, attr) for g in cluster]))
             pixel = tuple(np.median([g.pixel for g in cluster], axis=0))
             result.append(Glass(m("x"), m("y"), m("z"), m("diameter"), pixel,
-                                m("saturation"), m("brightness")))
+                                m("saturation"), m("brightness"), vote_orientation(cluster),
+                                m("margin"), cluster[-1].outline))
         return result
+
+
+def vote_orientation(cluster):
+    """One orientation for the detections of one glass over several frames.
+
+    None in classic mode. "?" unless at least ORIENTATION_AGREEMENT of all the
+    detections agree: a glass that flips between up and down is not trusted.
+    """
+    votes = [g.orientation for g in cluster]
+    if all(v is None for v in votes):
+        return None
+    for orientation in (gc.UP, gc.DOWN):
+        if votes.count(orientation) >= ORIENTATION_AGREEMENT * len(votes):
+            return orientation
+    return gc.UNSURE
 
 
 def load_area():
@@ -629,7 +765,7 @@ def draw_map(image, finder, glasses, points=None, tip_xy=None, place_xy=None):
             cv2.circle(image, tuple(p), 3, (255, 0, 255), -1)
     for g in glasses:
         cv2.circle(image, tuple(px((g.x, g.y))[0]), max(2, int(g.diameter / 2 * scale)),
-                   (0, 255, 0), -1)
+                   glass_color(g), -1)
     if place_xy is not None:
         cv2.drawMarker(image, tuple(px(place_xy)[0]), (255, 255, 0), cv2.MARKER_SQUARE, 14, 2)
     if tip_xy is not None:
@@ -656,19 +792,43 @@ def draw_map(image, finder, glasses, points=None, tip_xy=None, place_xy=None):
             cv2.line(image, (x0, v), (x0 + 5, v), (200, 200, 200), 1)
 
 
+def glass_color(g, default=(0, 255, 0)):
+    return ORIENTATION_COLORS.get(g.orientation, default)
+
+
 def draw_glasses(image, glasses, rejected=(), color=(0, 255, 0)):
+    """Glasses in `color`; in diff mode coloured by orientation, with the fitted outline."""
     for u, v, r, reason in rejected:
         u, v, r = int(round(u)), int(round(v)), int(round(r))
         cv2.circle(image, (u, v), r, (0, 0, 255), 1)
         cv2.putText(image, reason, (u - r, v - r - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
     for g in glasses:
+        c = glass_color(g, color)
         u, v, r = (int(round(p)) for p in g.pixel)
-        cv2.circle(image, (u, v), r, color, 2)
-        cv2.drawMarker(image, (u, v), color, cv2.MARKER_CROSS, 12, 2)
-        cv2.putText(image, f"{g.x * 1000:.0f}, {g.y * 1000:.0f} mm  d{g.diameter * 1000:.0f}",
-                    (u - r, v - r - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-        cv2.putText(image, f"S{g.saturation:.0f} V{g.brightness:.0f}", (u - r, v + r + 16),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        if g.outline is not None:
+            cv2.polylines(image, [np.round(g.outline).astype(np.int32)], True, c, 1)
+        cv2.circle(image, (u, v), r, c, 2)
+        cv2.drawMarker(image, (u, v), c, cv2.MARKER_CROSS, 12, 2)
+        label = "" if g.orientation is None else f"{g.orientation.upper()} "
+        cv2.putText(image, f"{label}{g.x * 1000:.0f}, {g.y * 1000:.0f} mm  d{g.diameter * 1000:.0f}",
+                    (u - r, v - r - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 2)
+        detail = f"S{g.saturation:.0f} V{g.brightness:.0f}"
+        if g.orientation is not None:
+            detail += f"  margin {g.margin:.0f}"
+        cv2.putText(image, detail, (u - r, v + r + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, c, 1)
+
+
+def draw_changes(image, finder):
+    """Diff mode: the change mask (v) and the objects that are not glasses."""
+    if finder.show_mask and finder.change is not None:
+        tint = image.copy()
+        tint[finder.change.mask > 0] = (255, 0, 255)
+        cv2.addWeighted(tint, 0.35, image, 0.65, 0, dst=image)
+    for obj in finder.objects:
+        c = OBJECT_COLORS[obj.label]
+        cv2.polylines(image, [obj.contour.astype(np.int32)], True, c, 2)
+        x, y = obj.contour.min(axis=0)
+        cv2.putText(image, obj.label, (int(x), int(y) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, 2)
 
 
 # --- detection window (shared with pick_place_glasses.py) -------------------------
@@ -679,6 +839,7 @@ TRACKBARS = {
     "roundness %": (ROUNDNESS, 99),
     "max saturation": (MAX_SATURATION, 255),
     "min brightness": (MIN_BRIGHTNESS, 255),
+    "diff": (tb.DIFF_THRESHOLD, 30),   # diff mode: change threshold in noise sigmas
 }
 
 
@@ -723,6 +884,7 @@ def read_trackbars(finder):
     finder.roundness = settings["roundness %"] / 100
     finder.max_saturation = settings["max saturation"]
     finder.min_brightness = settings["min brightness"]
+    finder.diff_threshold = max(settings["diff"], 1)
     if settings != _saved_settings:
         save_settings(settings)
         _saved_settings = settings
@@ -730,14 +892,39 @@ def read_trackbars(finder):
 
 def draw_overlay(image, finder, editor, glasses, status, tip_xy=None, place_xy=None):
     """Area, base axes, glasses, map and text; `image` must be undistorted."""
+    draw_changes(image, finder)
     editor.draw(image)
     draw_base_axes(image, finder.K, finder.T_base_cam, finder.table_z)
     draw_glasses(image, glasses, finder.rejected)
     draw_map(image, finder, glasses, editor.points, tip_xy, place_xy)
     cv2.putText(image, f"glasses: {len(glasses)}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    stale = finder.change is not None and finder.change.stale and finder.mode == DIFF
+    cv2.putText(image, f"mode: {finder.background_status()}", (10, 58),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255) if stale else (255, 255, 255), 2)
     cv2.putText(image, status, (10, image.shape[0] - 15),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+
+def diff_key(finder, key, cap, kick=None):
+    """b / d / v (also used by pick_place_glasses.py); returns the status line.
+
+    b captures the empty table, blocking ~1 s (kick: RobotWatchdog.kick after
+    every frame); stop jogging first. The robot and everything else must be
+    out of the camera view: whatever is there becomes "the table".
+    """
+    if key == "b":
+        finder.capture_background(cap, kick)
+        return "empty table captured, diff mode"
+    if key == "d":
+        if finder.background is None:
+            return warn("no table background yet: clear the table, robot out of view, press b")
+        finder.mode = CLASSIC if finder.mode == DIFF else DIFF
+        return f"detection mode: {finder.mode}"
+    if key == "v":
+        finder.show_mask = not finder.show_mask
+        return "change mask " + ("shown" if finder.show_mask else "hidden")
+    return None
 
 
 def make_tag_detector():
@@ -945,7 +1132,7 @@ def run(args):
     editor = AreaEditor(finder)
     setup_window(editor)
     status = ("p: measure  " + ("m: move above glass  s: stop  t: tip as corner  " if args.robot else "")
-              + "area: drag / u: undo / x: clear   q: quit")
+              + "b: empty table  d: mode  v: mask  area: drag / u / x   q: quit")
     watchdog = RobotWatchdog(rtde_c) if rtde_c else None
     try:
         while True:
@@ -979,13 +1166,26 @@ def run(args):
                 elif key == "s":
                     jogger.stop()
                     rtde_c.stopL(1.0)
+                elif key in DIFF_KEYS:
+                    if jogger:
+                        jogger.stop()   # b blocks the loop for a moment
+                    status = diff_key(finder, key, cap, kick=watchdog.kick if watchdog else None)
                 elif key in ("p", "m"):
                     if jogger:
                         jogger.stop()   # measuring blocks the loop for a moment
                     measured = finder.measure(cap, kick=watchdog.kick if watchdog else None)
-                    print(f"\n{len(measured)} glasses (base frame, rim z = {finder.rim_z * 1000:.0f} mm):")
+                    if finder.mode == DIFF and finder.change is not None and finder.change.stale:
+                        status = warn(f"table background stale, {key} ignored (clear the table, b)")
+                        continue
+                    print(f"\n{len(measured)} glasses (base frame, rim z = {finder.rim_z * 1000:.0f} mm, "
+                          f"{finder.mode} mode):")
                     for g in measured:
-                        print(f"  x {g.x * 1000:7.1f}  y {g.y * 1000:7.1f} mm   diameter {g.diameter * 1000:.0f} mm")
+                        orientation = "" if g.orientation is None else f"   {g.orientation} (margin {g.margin:.0f})"
+                        print(f"  x {g.x * 1000:7.1f}  y {g.y * 1000:7.1f} mm   diameter {g.diameter * 1000:.0f} mm"
+                              + orientation)
+                    for obj in finder.objects:
+                        print(f"  {obj.label} at x {obj.xy[0] * 1000:.0f}  y {obj.xy[1] * 1000:.0f} mm, "
+                              f"{obj.area * 1e4:.0f} cm^2")
                     if key == "m" and not measured:
                         status = warn("no glass found, m ignored")
                     elif key == "m":

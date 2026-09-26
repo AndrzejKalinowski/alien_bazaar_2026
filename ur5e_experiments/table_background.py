@@ -171,7 +171,8 @@ class TableBackground:
         noise = np.dstack(deviation) * (1.25 / len(stack))
         return cls(background, noise, image_size, T_base_cam)
 
-    def save(self, path=BACKGROUND_FILE):
+    def save(self, path=None):
+        path = path or BACKGROUND_FILE   # looked up now, so tests can point it elsewhere
         tmp = path + ".tmp.npz"   # np.savez appends .npz to names without it
         np.savez_compressed(tmp, background=self.background, noise=self.noise,
                             image_size=np.array(self.image_size), T_base_cam=self.T_base_cam,
@@ -179,8 +180,9 @@ class TableBackground:
         os.replace(tmp, path)
 
     @classmethod
-    def load(cls, image_size, T_base_cam, path=BACKGROUND_FILE):
+    def load(cls, image_size, T_base_cam, path=None):
         """The saved background, or None (with the reason printed) if missing or not valid now."""
+        path = path or BACKGROUND_FILE
         if not os.path.exists(path):
             return None
         try:
