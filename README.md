@@ -90,6 +90,7 @@ alien_bazaar_2026/
 │   ├── hand_eye_calibration.py        automatic wrist camera ↔ TCP calibration
 │   ├── calibrate_camera.py            lens calibration with a ChArUco board (either camera)
 │   ├── gamepad_jog.py                 gamepad → speedL jogging helper (used by the others)
+│   ├── robot_watchdog.py              RTDE watchdog: robot stops if the main loop stalls
 │   ├── suction.py                     host driver for the gripper serial protocol
 │   ├── bus_servos.py                  Feetech/Waveshare STS bus servos: rotator + sprayer
 │   ├── gamepad_robot_teleop.py        plain gamepad teleop with auto fault recovery
@@ -433,12 +434,13 @@ These are software guards, **not** a replacement for the UR safety configuration
 | `MAX_TCP_Z` | 0.60 m | `follow_april_tag.py` | Targets are clamped below it. Jogging up slows near it. In `follow_april_tag` a task more than 2 cm above it is aborted, and home is refused if it is above the ceiling |
 | `MAX_OVERSHOOT` | 20 mm / 15 mm | tag picker / glass pick-place | The farthest a force-guarded push may go past the expected surface |
 | `CONTACT_FORCE` / `PLACE_FORCE` | 12 N / 10 N / 8 N | tag pick / glass pick / glass place | Descent stops above this force |
-| `CAMERA_TIMEOUT` | 0.5 s | `follow_april_tag.py` | No new frame → `speedStop` |
+| `CAMERA_TIMEOUT` / `FRAME_TIMEOUT` | 0.5 s | `follow_april_tag.py` / `find_glasses.py` | No new frame → `speedStop` / error (the `finally` stops the robot) |
+| `WATCHDOG_MIN_FREQUENCY` | 5 Hz | `robot_watchdog.py`, used by `pick_place_glasses`, `find_glasses`, `follow_april_tag`, `gamepad_robot_teleop` | The controller stops the control script if no RTDE input arrives for 0.2 s. The next loop iteration re-uploads it and aborts the task |
 | Manual override | – | all task-based scripts | Any stick input aborts the running task |
 | `speedL` time | 0.02 s | everywhere | Never 0. With `time=0` the control script spins and the robot protective-stops with **C271A1** |
 | Tilt check | 10° | `pick_place_glasses.py` | Refuses to start unless the tool points down |
 
-Important: **`speedL` keeps the robot moving at the last commanded speed until the next command or `speedStop`**. If the Python loop hangs, the robot keeps going. See AUDIT.md for the watchdog recommendation.
+Important: **`speedL` keeps the robot moving at the last commanded speed until the next command or `speedStop`**. The watchdog above stops it if the Python loop hangs. Because of the watchdog, never use a **blocking** `moveJ` / `moveL` in these scripts (it sends nothing while it runs and trips the watchdog): use `async=True` and keep calling `watchdog.kick()`.
 
 ---
 
@@ -468,7 +470,8 @@ To find COM ports: Device Manager → Ports, or `python -m serial.tools.list_por
 | Symptom | Likely cause / fix |
 |---|---|
 | Robot protective-stops with **C271A1 "Runtime is too much behind"** | `speedL` called with `time=0`. Always pass `SPEED_CMD_TIME` |
-| `RTDE control script is not running` | A protective stop, an e-stop or local mode killed the script. `follow_april_tag.py` calls `reuploadScript()` on errors; otherwise restart the script. Also make sure no PolyScope program is running |
+| `RTDE control script is not running` | A protective stop, an e-stop, local mode or the watchdog killed the script. The watchdog-enabled scripts re-upload it by themselves (after the stop is cleared on the pendant); otherwise restart the script. Also make sure no PolyScope program is running |
+| "Robot control script stopped (main loop stalled?)" | The watchdog fired: the loop sent nothing for 0.2 s. Look for something blocking the loop (a slow camera, dragging the window, `grip()` waiting for a release pulse) |
 | Wrong camera opens / "calibrated at … but camera gives …" | Windows renumbered the USB cameras. Change `CAMERA_INDEX` / `OVERHEAD_CAMERA_INDEX`. Check that the image is the one you expect before trusting the calibration |
 | Glass positions consistently off by a few mm to cm | Wrong `RIM_HEIGHT` for the kind of glass, the camera was bumped (redo step 3), or the TCP changed on the pendant |
 | Tag "base" position drifts while jogging (wrist camera) | Bad `hand_eye.npz` or intrinsics. Redo steps 1–2, and check `TAG_SIZE` |

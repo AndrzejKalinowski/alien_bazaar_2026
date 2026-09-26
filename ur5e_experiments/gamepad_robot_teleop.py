@@ -1,6 +1,7 @@
 import rtde_control, rtde_receive
-from time import sleep
+from time import sleep, time
 from gamepad_jog import GamepadControl, Jogger
+from robot_watchdog import RobotWatchdog
 from suction import Suction
 
 IP = "192.168.1.20"
@@ -84,17 +85,24 @@ def main():
 
     r, c = connect_rtde()
     jogger = Jogger(c, gamepad)
+    watchdog = RobotWatchdog(c)
+    home_started = None   # time the home move started, None = not homing
 
     try:
         while True:
             try:
+                if not watchdog.kick():
+                    jogger.stop()
+                    home_started = None
+
                 keys = gamepad.poll_keys()
 
-                if "h" in keys:
+                if "h" in keys and home_started is None:
                     print("Go home")
                     jogger.stop()
-                    c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL)
-                    continue
+                    # Asynchronous: a blocking moveJ sends nothing and would trip the watchdog
+                    c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL, True)
+                    home_started = time()
 
                 if "g" in keys:
                     print("Grip")
@@ -104,7 +112,16 @@ def main():
                     print("Release")
                     suction.release()
 
-                jogger.update()
+                if home_started is not None:
+                    if gamepad.jog_speed() is not None:
+                        print("Manual override, home move aborted")
+                        c.stopJ()
+                        home_started = None
+                    # Give the async move a moment to start before checking if it finished
+                    elif time() - home_started > 0.2 and c.getAsyncOperationProgress() < 0:
+                        home_started = None
+                if home_started is None:
+                    jogger.update()
                 sleep(LOOP_DT)
             except (KeyboardInterrupt, SystemExit):
                 raise
@@ -113,6 +130,8 @@ def main():
                 sleep(ERROR_RETRY_DELAY)
                 r, c = recover_from_fault(r, c)
                 jogger = Jogger(c, gamepad)
+                watchdog = RobotWatchdog(c)   # the re-uploaded script has no watchdog
+                home_started = None
     except (KeyboardInterrupt, SystemExit):
         try:
             c.speedStop()

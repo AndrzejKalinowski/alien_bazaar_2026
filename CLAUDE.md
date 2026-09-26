@@ -11,6 +11,7 @@ Hackathon code (Alien Bazaar 2026, team Rabyte) for a **UR5e robot arm with a cu
 - **Never run** a script that connects to the robot (`192.168.1.20`), the gripper or the servos unless the user explicitly asks. Anything that imports `rtde_control` and constructs `RTDEControlInterface` can move the arm. Offline checks are always fine: `compileall` (below), pure-function tests. Note that `--help` still imports the module, and some modules connect or open ports only inside `main()`, so check first.
 - **Do not loosen safety limits silently.** This covers `MIN_TCP_Z`, `MAX_TCP_Z`, `MAX_OVERSHOOT`, `CONTACT_FORCE`/`PLACE_FORCE`, speed and acceleration constants, `CAMERA_TIMEOUT` and tilt checks. If a change needs it, say so explicitly.
 - **Always pass a non-zero time to `speedL`** (`SPEED_CMD_TIME = 0.02`). `time=0` makes the robot protective-stop (C271A1). `speedL` keeps moving until the next command or `speedStop`. Never add code that blocks the main loop while a `speedL` is active; call `jogger.stop()` / `speedStop()` first.
+- **Motion watchdog:** robot main loops create `RobotWatchdog(rtde_c)` right before the loop and call `watchdog.kick()` once per iteration (False = robot was stopped, abort the task). No blocking `moveJ`/`moveL` in those loops (use `async=True`), nothing else that blocks > 0.2 s without kicking, and call `watchdog.arm()` after every `reuploadScript()`.
 - Every exit path must stop motion: keep the `try/finally` blocks that call `speedStop` / `stopL` / `stopScript`.
 
 ## Layout
@@ -20,6 +21,7 @@ Hackathon code (Alien Bazaar 2026, team Rabyte) for a **UR5e robot arm with a cu
   - `find_glasses.py`: `GlassFinder` (Hough circles + HSV rim filter + back-projection to base frame), `AreaEditor`, overhead-camera calibration (`--calibrate`). It is both a tool and a library.
   - `follow_april_tag.py`: wrist-camera tag picker **and the de facto shared module**: `IP`, `HOME_Q`, `MIN/MAX_TCP_Z`, `TAG_DICTIONARY`, `TAG_SIZE`, `pose_to_matrix`, `Camera`, `TagDetector`, `connect_suction`. Importing it has side effects (it loads `hand_eye.npz` and needs `ur_rtde`).
   - `gamepad_jog.py`: `GamepadControl` (button → key edges, stick → speed vector), `Jogger`.
+  - `robot_watchdog.py`: `RobotWatchdog`, the RTDE watchdog that stops the robot when a main loop stalls.
   - `suction.py`: host driver for the gripper serial protocol.
   - `hand_eye_calibration.py`, `calibrate_camera.py`: calibration tools that write the `.npz` files.
   - `bus_servos.py`: Feetech STS bus servos (not integrated with the robot yet).

@@ -58,6 +58,9 @@ Detection mode:
   trackbar values are saved to detection_settings.json whenever they change
   and loaded on the next start (also by GlassFinder in other scripts); delete
   the file to go back to the defaults below.
+  With --robot (and in --calibrate) the robot_watchdog.py motion watchdog is
+  on: the robot stops if the loop stalls for 0.2 s, and read_frame() raises
+  after FRAME_TIMEOUT without a camera frame.
 
 Colour filter:
   For every circle a thin ring of pixels along its edge is converted to HSV.
@@ -101,6 +104,7 @@ Requires: pip install opencv-python ur_rtde
 import argparse
 import json
 import os
+import time
 from dataclasses import dataclass
 
 import cv2
@@ -108,6 +112,7 @@ import numpy as np
 
 from follow_april_tag import IP, TAG_DICTIONARY, pose_to_matrix
 from gamepad_jog import GamepadControl, Jogger
+from robot_watchdog import RobotWatchdog
 
 # --- camera -------------------------------------------------------------------
 
@@ -115,6 +120,7 @@ OVERHEAD_CAMERA_INDEX = 2
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 CAMERA_HFOV_DEG = 70.0   # only used when there is no intrinsics file
+FRAME_TIMEOUT = 0.5      # s without a frame -> error, so the finally blocks stop the robot
 HERE = os.path.dirname(__file__)
 INTRINSICS_FILE = os.path.join(HERE, "overhead_camera_calibration.npz")
 POSE_FILE = os.path.join(HERE, "overhead_camera_pose.npz")
@@ -235,11 +241,15 @@ def open_camera():
     raise RuntimeError("Camera gives no frames")
 
 
-def read_frame(cap):
+def read_frame(cap, timeout=FRAME_TIMEOUT):
+    # Looping forever here would keep a running speedL going (unplugged camera)
+    deadline = time.time() + timeout
     while True:
         ok, frame = cap.read()
         if ok:
             return frame
+        if time.time() > deadline:
+            raise RuntimeError(f"no frame from camera {OVERHEAD_CAMERA_INDEX} for {timeout} s")
 
 
 def draw_base_axes(image, K, T_base_cam, origin_z, length=0.1):
@@ -382,11 +392,17 @@ class GlassFinder:
         pixels, _ = cv2.projectPoints(points, rvec, T_cam_base[:3, 3], self.K, None)
         return pixels.reshape(-1, 2).astype(np.int32)
 
-    def measure(self, cap, frames=MEASURE_FRAMES):
-        """Glasses found consistently over several frames, positions averaged (median)."""
+    def measure(self, cap, frames=MEASURE_FRAMES, kick=None):
+        """Glasses found consistently over several frames, positions averaged (median).
+
+        kick: called after every frame (RobotWatchdog.kick), this blocks for ~0.5 s.
+        """
         clusters = []   # lists of Glass belonging to the same physical glass
         for _ in range(frames):
-            for g in self.detect(self.undistort(read_frame(cap))):
+            frame = read_frame(cap)
+            if kick:
+                kick()
+            for g in self.detect(self.undistort(frame)):
                 for cluster in clusters:
                     ref = cluster[0]
                     if np.hypot(g.x - ref.x, g.y - ref.y) < ref.diameter / 4:
@@ -815,9 +831,14 @@ def calibrate(args):
     points, pending = load_progress(width, height, args.fresh)
     freedrive = False
     status = "Robot out of view, SPACE / A: measure tags"
+    watchdog = RobotWatchdog(rtde_c)
     try:
         while True:
             image = undistort(read_frame(cap))
+            if not watchdog.kick():
+                jogger.stop()
+                freedrive = False   # the new control script is not in teach mode
+                status = "Robot was stopped (loop stall / protective stop)"
             visible = tag_centers(detector, image)
             for tag_id, c in visible.items():
                 cv2.drawMarker(image, c.astype(int), (0, 255, 255), cv2.MARKER_CROSS, 20, 2)
@@ -864,7 +885,9 @@ def calibrate(args):
                     jogger.stop()   # measuring blocks the loop for a moment
                     samples = {}
                     for _ in range(CALIB_FRAMES):
-                        for tag_id, c in tag_centers(detector, undistort(read_frame(cap))).items():
+                        frame = read_frame(cap)
+                        watchdog.kick()
+                        for tag_id, c in tag_centers(detector, undistort(frame)).items():
                             samples.setdefault(tag_id, []).append(c)
                     pending = [(tag_id, np.median(s, axis=0)) for tag_id, s in sorted(samples.items())
                                if len(s) >= CALIB_FRAMES // 2]
@@ -915,12 +938,16 @@ def run(args):
     setup_window(editor)
     status = ("p: measure  " + ("m: move above glass  s: stop  t: tip as corner  " if args.robot else "")
               + "area: drag / u: undo / x: clear   q: quit")
+    watchdog = RobotWatchdog(rtde_c) if rtde_c else None
     try:
         while True:
             if window_closed():
                 break
             read_trackbars(finder)
             image = finder.undistort(read_frame(cap))
+            if watchdog and not watchdog.kick():
+                jogger.stop()
+                status = "Robot was stopped (loop stall / protective stop)"
             glasses = finder.detect(image)
             tip_xy = rtde_r.getActualTCPPose()[:2] if rtde_r else None
             draw_overlay(image, finder, editor, glasses, status, tip_xy)
@@ -944,7 +971,7 @@ def run(args):
                 elif key in ("p", "m"):
                     if jogger:
                         jogger.stop()   # measuring blocks the loop for a moment
-                    measured = finder.measure(cap)
+                    measured = finder.measure(cap, kick=watchdog.kick if watchdog else None)
                     print(f"\n{len(measured)} glasses (base frame, rim z = {finder.rim_z * 1000:.0f} mm):")
                     for g in measured:
                         print(f"  x {g.x * 1000:7.1f}  y {g.y * 1000:7.1f} mm   diameter {g.diameter * 1000:.0f} mm")

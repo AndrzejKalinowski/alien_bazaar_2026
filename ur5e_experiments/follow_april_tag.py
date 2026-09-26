@@ -32,6 +32,10 @@ Manual jogging with the gamepad (see gamepad_jog.py):
   hold LB = fine.
 Touching the sticks/triggers during a pick aborts it (manual override).
 
+Motion watchdog (robot_watchdog.py): the robot stops by itself if the main
+loop sends nothing for 0.2 s (stalled loop, camera hang, breakpoint). The
+next loop iteration then re-uploads the control script and aborts the task.
+
 Setup before first use:
   * Set the TCP on the pendant to the tip of the suction cup, so that
     getActualTCPPose() is the point that touches the object.
@@ -61,6 +65,7 @@ import rtde_receive
 import math
 
 from gamepad_jog import SPEED_ACCEL, GamepadControl
+from robot_watchdog import RobotWatchdog
 from serial import SerialException
 from suction import Suction
 
@@ -594,9 +599,16 @@ def main():
     status = "ready"
     stamp = 0.0
 
+    watchdog = RobotWatchdog(c)
     try:
         while True:
             frame, stamp = camera.read(newer_than=stamp)
+            if not watchdog.kick():
+                if task is not None:
+                    task.abort()
+                    task = None
+                jogging = False
+                status = "robot was stopped (loop stall / protective stop), task aborted"
             if frame is None:
                 # Never keep moving blind
                 if task is not None:
@@ -685,6 +697,7 @@ def main():
                 try:
                     c.speedStop()
                     c.reuploadScript()
+                    watchdog.arm()   # the new script has no watchdog
                 except Exception as e2:
                     print(f"Recovery failed: {e2}")
 

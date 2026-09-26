@@ -34,6 +34,10 @@ The place tag (PLACE_TAG_ID, any 36h11 size) lies flat on the table inside
 the camera view; its last seen position is kept, since the placed glass covers
 it. It is shown as a cyan square in the video and on the map.
 
+Motion watchdog (robot_watchdog.py): the robot stops by itself if the main
+loop sends nothing for 0.2 s (stalled loop, camera hang, breakpoint). The
+next loop iteration then re-uploads the control script and aborts the task.
+
 Requires: pip install opencv-python ur_rtde pyserial
 """
 
@@ -47,6 +51,7 @@ import rtde_receive
 import find_glasses as fg
 from follow_april_tag import HOME_Q, IP, MAX_TCP_Z, MIN_TCP_Z, connect_suction
 from gamepad_jog import GamepadControl, Jogger
+from robot_watchdog import RobotWatchdog
 
 PLACE_TAG_ID = None          # None = the lowest id in view
 PLACED_RADIUS = 0.04         # m, a glass this close to the tag already stands on it
@@ -270,12 +275,19 @@ def main():
     task = None
     place_xy = None
     status = "p: pick & place  s: stop  g/r: grip/release  h: home  q: quit"
+    watchdog = RobotWatchdog(c)
     try:
         while True:
             if fg.window_closed():
                 break
             fg.read_trackbars(finder)
             image = finder.undistort(fg.read_frame(cap))
+            if not watchdog.kick():
+                if task is not None:
+                    task.abort()
+                    task = None
+                jogger.stop()
+                status = "robot was stopped (loop stall / protective stop), task aborted"
             glasses = finder.detect(image)
             seen = find_place_tag(detector, finder, image)
             if seen is not None:
@@ -327,7 +339,7 @@ def main():
                         status = f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} in view"
                         continue
                     status = "measuring..."
-                    glass = choose_glass(finder.measure(cap), place_xy)
+                    glass = choose_glass(finder.measure(cap, kick=watchdog.kick), place_xy)
                     if glass is None:
                         status = "no glass found"
                         continue
