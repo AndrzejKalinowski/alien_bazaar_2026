@@ -58,6 +58,9 @@ Keys (video window) / gamepad:
   q / Esc          quit
   Sticks jog the robot (gamepad_jog.py); touching them aborts a running task.
   The mouse edits the detection area as in find_glasses.py.
+  A command that can't run right now (g during the 1.5 s release pulse or
+  while a task runs, p / h while a task runs, ...) is refused with a WARNING
+  in the console and the window; the program keeps running.
 
 All motion goes through safe_motion.py: the TCP never goes above MAX_TCP_Z
 (0.60 m above the base). A move that would is refused and the task stops.
@@ -65,6 +68,10 @@ All motion goes through safe_motion.py: the TCP never goes above MAX_TCP_Z
 The place tag (PLACE_TAG_ID, any 36h11 size) lies flat on the table inside
 the camera view; its last seen position is kept, since the placed glass covers
 it. It is shown as a cyan square in the video and on the map.
+
+Motion watchdog (robot_watchdog.py): the robot stops by itself if the main
+loop sends nothing for 0.2 s (stalled loop, camera hang, breakpoint). The
+next loop iteration then re-uploads the control script and aborts the task.
 
 Requires: pip install opencv-python ur_rtde pyserial numpy
 """
@@ -78,7 +85,10 @@ import find_glasses as fg
 import safe_motion
 from follow_april_tag import HOME_Q, IP, MAX_TCP_Z, MIN_TCP_Z, connect_suction
 from gamepad_jog import GamepadControl, Jogger
+from robot_watchdog import RobotWatchdog
 from safe_motion import MotionRefused
+from serial import SerialException
+from suction import key_command
 
 PLACE_TAG_ID = None          # None = the lowest id in view
 PLACED_RADIUS = 0.04         # m, a glass this close to the tag already stands on it
@@ -126,6 +136,12 @@ class TaskFailed(Exception):
     pass
 
 
+def warn(message):
+    """A refused operator command: printed and shown in the window, the loop goes on."""
+    print(f"WARNING: {message}")
+    return message
+
+
 class Task:
     """Runs a generator one step per video frame; each step returns quickly."""
 
@@ -148,6 +164,12 @@ class Task:
             print(e)
             self.c.speedStop(STOP_DECEL)
             self.status = str(e)
+            self.done = True
+        except (SerialException, OSError) as e:
+            # Gripper unplugged mid-task: stop this task, not the whole program
+            self.c.speedStop(STOP_DECEL)
+            self.c.stopL(STOP_DECEL)
+            self.status = warn(f"gripper not responding ({e}), task aborted")
             self.done = True
 
     def abort(self):
@@ -267,7 +289,8 @@ class PickPlaceTask(Task):
         yield from self.move_to([start[0], start[1], max(start[2], carry_z)], "up")
         yield from self.move_to([g.x, g.y, carry_z], "to glass", speed=APPROACH_SPEED)
         yield from self.move_to([g.x, g.y, foot_z + APPROACH_GAP], "approach glass", speed=APPROACH_SPEED)
-        self.suction.grip()
+        while not self.suction.grip():
+            yield "waiting for the release pulse to end"
         yield from self.push_down(foot_z - MAX_OVERSHOOT, CONTACT_FORCE, "pick")
 
         yield from self.wait_for_grip([[g.x, g.y, carry_z]])
@@ -362,7 +385,8 @@ class SidePickPlaceTask(PickPlaceTask):
         yield from self.move_to([start[0], start[1], safe_z], "turn tool sideways")
         yield from self.move_to([standoff[0], standoff[1], carry_z], "to glass", speed=APPROACH_SPEED)
         yield from self.move_to(list(standoff), "down beside glass", speed=APPROACH_SPEED)
-        self.suction.grip()
+        while not self.suction.grip():
+            yield "waiting for the release pulse to end"
         yield from self.push(approach, SIDE_STANDOFF + SIDE_MAX_PRESS, SIDE_CONTACT_FORCE, "pick")
         yield from self.wait_for_grip([list(standoff),
                                        [standoff[0], standoff[1], carry_z]])
@@ -434,12 +458,19 @@ def main():
     task = None
     place_xy = None
     status = "p: pick & place  s: stop  g/r: grip/release  h: home  q: quit"
+    watchdog = RobotWatchdog(c)
     try:
         while True:
             if fg.window_closed():
                 break
             fg.read_trackbars(finder)
             image = finder.undistort(fg.read_frame(cap))
+            if not watchdog.kick():
+                if task is not None:
+                    task.abort()
+                    task = None
+                jogger.stop()
+                status = "robot was stopped (loop stall / protective stop), task aborted"
             glasses = finder.detect(image)
             seen = find_place_tag(detector, finder, image)
             if seen is not None:
@@ -482,12 +513,11 @@ def main():
                     jogger.stop()
                     c.speedStop(STOP_DECEL)
                     status = "stopped"
-                elif key == "g":
-                    suction.grip()
-                    status = "vacuum on"
-                elif key == "r":
-                    suction.release()
-                    status = "released"
+                elif key == "g" and task is not None:
+                    # The pick task controls the vacuum and waits for its GRIP result
+                    status = warn("task running, g ignored (s stops the task)")
+                elif key in ("g", "r"):
+                    status = key_command(suction, key)
                 elif key == "o":
                     pose = r.getActualTCPPose()
                     rotation = ", ".join(f"{v:.5f}" for v in pose[3:])
@@ -499,18 +529,21 @@ def main():
                     else:
                         status = f"SIDE_APPROACH_YAW_DEG = {side[0]:.0f}  SIDE_ROLL_DEG = {side[1]:.0f}"
                     print(status)
-                elif key == "h" and task is None:
+                elif key in ("h", "p") and task is not None:
+                    status = warn(f"task running ({task.status}), {key} ignored (s stops the task)")
+                elif key == "h":
                     jogger.stop()
                     task = HomeTask(r, c)
-                elif key == "p" and task is None:
+                elif key == "p":
                     jogger.stop()
                     if place_xy is None:
-                        status = f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} in view"
+                        status = warn(f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} "
+                                      "in view, p ignored")
                         continue
                     status = "measuring..."
-                    glass = choose_glass(finder.measure(cap), place_xy)
+                    glass = choose_glass(finder.measure(cap, kick=watchdog.kick), place_xy)
                     if glass is None:
-                        status = "no glass found"
+                        status = warn("no glass found, p ignored")
                         continue
                     task_class = SidePickPlaceTask if PICK_FROM_SIDE else PickPlaceTask
                     task = task_class(r, c, suction, glass, place_xy,

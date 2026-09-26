@@ -13,8 +13,11 @@ can still follow), "GRIP LOST" if the object drops while gripping, and
 
 RELEASE fires a 1.5 s release pulse and replies "DONE RELEASE" when it ends.
 During the pulse the controller answers GRIP and RELEASE with "ERR BUSY", so
-grip() waits for a pending release to finish first. A repeated GRIP while
-already gripping also returns "ERR BUSY".
+grip() and release() refuse (return False, send nothing) while a pulse is
+still running: they are called from video loops that must not block for 1.5 s.
+Tasks retry grip() every step until it goes through; grip_and_wait() waits
+for the pulse instead. A repeated GRIP while already gripping also returns
+"ERR BUSY".
 """
 
 import serial
@@ -32,21 +35,30 @@ class Suction:
         self._serial = serial.Serial(port, baudrate, timeout=0)
         self._buffer = b""
         self._release_pending = False
+        self._release_started = 0.0
         self._grip_result = None
         sleep(2)  # let the controller reset after opening the serial port
+
+    def release_pending(self):
+        """Non-blocking: True while the release pulse is running."""
+        self._read_lines(())
+        if self._release_pending and monotonic() - self._release_started > RELEASE_TIMEOUT:
+            self._release_pending = False  # "DONE RELEASE" was lost, don't refuse forever
+        return self._release_pending
 
     def grip(self):
         """Switch the vacuum on without waiting for the result.
 
-        If a release pulse is still running, waits for it to end first
-        (at most RELEASE_TIMEOUT), since the controller rejects GRIP meanwhile.
+        Returns False and sends nothing while a release pulse is still
+        running (the controller would answer ERR BUSY); try again later.
         """
-        if self._release_pending:
-            self.wait_for_release()
+        if self.release_pending():
+            return False
         self._serial.reset_input_buffer()
         self._buffer = b""
         self._grip_result = None
         self._serial.write(b"GRIP\n")
+        return True
 
     def grip_result(self):
         """Non-blocking: the latest grip report since the last grip().
@@ -75,19 +87,25 @@ class Suction:
 
         On False the vacuum stays on; call release() to switch it off.
         """
+        self.wait_for_release()
         self.grip()
         return self.wait_for_grip(timeout) == "OK"
 
     def release(self, wait=False):
         """Switch the vacuum off and fire the release pulse.
 
+        Returns False and sends nothing if a release pulse is already running.
         With wait=True, blocks until the pulse ends and returns True on
-        "DONE RELEASE"; otherwise returns immediately.
+        "DONE RELEASE"; otherwise returns True right away.
         """
+        if self.release_pending():
+            return False
         self._serial.write(b"RELEASE\n")
         self._release_pending = True
+        self._release_started = monotonic()
         if wait:
             return self.wait_for_release()
+        return True
 
     def wait_for_release(self, timeout=RELEASE_TIMEOUT):
         """Wait for the running release pulse to end. Returns True on success."""
@@ -165,6 +183,30 @@ class Suction:
             if prefixes and line.startswith(prefixes):
                 return line
         return None
+
+
+def key_command(suction, key):
+    """The g (grip) / r (release) operator keys, for the video loops.
+
+    Prints and returns a status line. A command that can't be carried out is
+    refused with a warning instead of blocking or raising, so the loop (and
+    the robot watchdog) keeps running.
+    """
+    try:
+        if key == "g":
+            if suction.grip():
+                print("vacuum on")
+                return "vacuum on"
+            message = "release pulse still running, grip refused - try again in a moment"
+        else:
+            if suction.release():
+                print("released")
+                return "released"
+            message = "release pulse already running, release ignored"
+    except (serial.SerialException, OSError) as e:
+        message = f"gripper not responding ({e}), command not sent"
+    print(f"WARNING: {message}")
+    return message
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 import safe_motion
-from time import sleep
+from time import sleep, time
 from gamepad_jog import GamepadControl, Jogger
-from suction import Suction
+from robot_watchdog import RobotWatchdog
+from suction import Suction, key_command
 
 IP = "192.168.1.20"
 
@@ -12,14 +13,11 @@ LOOP_DT = 0.02          # seconds per control loop tick
 HOME_SPEED = 1.0
 HOME_ACCEL = 1.0
 
-DEADZONE = 0.15
-
 RECONNECT_DELAY = 1.0   # seconds to wait between reconnect attempts
 ERROR_RETRY_DELAY = 0.5  # seconds to wait after a non-connection error
 
-
-def apply_deadzone(value):
-    return value if abs(value) > DEADZONE else 0.0
+# Gamepad button -> key character: START = home, B = grip, X = release.
+GAMEPAD_KEYS = {"BTN_START": "h", "BTN_EAST": "g", "BTN_WEST": "r"}
 
 
 def connect_rtde():
@@ -86,27 +84,42 @@ def main():
 
     r, c = connect_rtde()
     jogger = Jogger(c, gamepad)
+    watchdog = RobotWatchdog(c)
+    home_started = None   # time the home move started, None = not homing
 
     try:
         while True:
             try:
+                if not watchdog.kick():
+                    jogger.stop()
+                    home_started = None
+
                 keys = gamepad.poll_keys()
 
-                if "h" in keys:
+                if "h" in keys and home_started is not None:
+                    print("WARNING: already going home, h ignored")
+                elif "h" in keys:
                     print("Go home")
                     jogger.stop()
-                    c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL)
-                    continue
+                    # Asynchronous: a blocking moveJ sends nothing and would trip the watchdog
+                    c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL, True)
+                    home_started = time()
 
-                if "g" in keys:
-                    print("Grip")
-                    suction.grip()
+                for key in ("g", "r"):
+                    if key in keys:
+                        # Refused commands only warn, so they never reach the robot recovery below
+                        key_command(suction, key)
 
-                if "r" in keys:
-                    print("Release")
-                    suction.release()
-
-                jogger.update()
+                if home_started is not None:
+                    if gamepad.jog_speed() is not None:
+                        print("Manual override, home move aborted")
+                        c.stopJ()
+                        home_started = None
+                    # Give the async move a moment to start before checking if it finished
+                    elif time() - home_started > 0.2 and c.getAsyncOperationProgress() < 0:
+                        home_started = None
+                if home_started is None:
+                    jogger.update()
                 sleep(LOOP_DT)
             except (KeyboardInterrupt, SystemExit):
                 raise
@@ -115,6 +128,8 @@ def main():
                 sleep(ERROR_RETRY_DELAY)
                 r, c = recover_from_fault(r, c)
                 jogger = Jogger(c, gamepad)
+                watchdog = RobotWatchdog(c)   # the re-uploaded script has no watchdog
+                home_started = None
     except (KeyboardInterrupt, SystemExit):
         try:
             c.speedStop()

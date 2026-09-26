@@ -16,7 +16,8 @@ Usage:
   jogger.stop(); gamepad.close()
 
 Call update() at least every ~50 ms while jogging; before anything that blocks
-the loop for longer, call jogger.stop().
+the loop for longer, call jogger.stop(). Use it together with
+robot_watchdog.RobotWatchdog, which stops the robot if the loop stalls anyway.
 """
 
 from inputs import devices

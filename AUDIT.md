@@ -21,10 +21,10 @@ For **tomorrow's demo**, do items 1–4 and the "demo hardening" list at the end
 ### High
 
 **1. `gamepad_robot_teleop.py` crashes on start: `NameError: GAMEPAD_KEYS`**
-[ur5e_experiments/gamepad_robot_teleop.py:84](ur5e_experiments/gamepad_robot_teleop.py#L84). The uncommitted refactor to `GamepadControl` removed the old button handling but never defined the key map. `DEADZONE` / `apply_deadzone` are now unused too.
+[ur5e_experiments/gamepad_robot_teleop.py:84](ur5e_experiments/gamepad_robot_teleop.py#L84). The uncommitted refactor to `GamepadControl` removed the old button handling but never defined the key map. `DEADZONE` / `apply_deadzone` are now unused too. *Fixed on branch `fix/audit`.*
 *Fix:* add `GAMEPAD_KEYS = {"BTN_START": "h", "BTN_EAST": "g", "BTN_WEST": "r"}` (the old behaviour) and delete the dead helpers.
 
-**2. No motion watchdog: if the Python loop stalls, the robot keeps moving**
+**2. No motion watchdog: if the Python loop stalls, the robot keeps moving** *Fixed on branch `fix/audit`: `robot_watchdog.py` (5 Hz, not 10 Hz, for margin against slow frames), `read_frame()` timeout.*
 `speedL` keeps executing the last velocity until a new command or `speedStop` arrives. `follow_april_tag.py` handles a camera timeout, but:
 - [find_glasses.py:238](ur5e_experiments/find_glasses.py#L238) `read_frame()` loops **forever** if the camera stops delivering frames (USB glitch or unplug). It is used by `find_glasses.py` and `pick_place_glasses.py` in the main loop, *including during `PickPlaceTask.push_down()`, which is a `speedL` descent*, and during jogging.
 - A Python exception outside the `try` or a debugger breakpoint has the same effect.

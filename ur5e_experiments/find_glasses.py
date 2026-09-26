@@ -54,10 +54,15 @@ Detection mode:
     q/Esc  quit
   With --robot the gamepad jogs the robot too; buttons: X = p, Y = m, A = s,
   B = t (add the tip position as an area corner).
+  Keys that can't run (m / s / t without --robot, m with no glass found, c
+  with bad points) are refused with a WARNING; the program keeps running.
   The trackbars tune edge threshold and roundness for your lighting. All
   trackbar values are saved to detection_settings.json whenever they change
   and loaded on the next start (also by GlassFinder in other scripts); delete
   the file to go back to the defaults below.
+  With --robot (and in --calibrate) the robot_watchdog.py motion watchdog is
+  on: the robot stops if the loop stalls for 0.2 s, and read_frame() raises
+  after FRAME_TIMEOUT without a camera frame.
 
 Colour filter:
   For every circle a thin ring of pixels along its edge is converted to HSV.
@@ -101,6 +106,7 @@ Requires: pip install opencv-python ur_rtde
 import argparse
 import json
 import os
+import time
 from dataclasses import dataclass
 
 import cv2
@@ -109,6 +115,7 @@ import numpy as np
 import safe_motion
 from follow_april_tag import IP, TAG_DICTIONARY, pose_to_matrix
 from gamepad_jog import GamepadControl, Jogger
+from robot_watchdog import RobotWatchdog
 
 # --- camera -------------------------------------------------------------------
 
@@ -116,6 +123,7 @@ OVERHEAD_CAMERA_INDEX = 2
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 CAMERA_HFOV_DEG = 70.0   # only used when there is no intrinsics file
+FRAME_TIMEOUT = 0.5      # s without a frame -> error, so the finally blocks stop the robot
 HERE = os.path.dirname(__file__)
 INTRINSICS_FILE = os.path.join(HERE, "overhead_camera_calibration.npz")
 POSE_FILE = os.path.join(HERE, "overhead_camera_pose.npz")
@@ -168,6 +176,12 @@ RUN_GAMEPAD_KEYS = {"BTN_WEST": "p", "BTN_NORTH": "m", "BTN_SOUTH": "s", "BTN_EA
 def window_closed():
     """True once the window was closed with its X button (the trackbars are gone then)."""
     return cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1
+
+
+def warn(message):
+    """A refused operator command: printed and shown in the window, the loop goes on."""
+    print(f"WARNING: {message}")
+    return message
 
 
 def read_keys(gamepad):
@@ -236,11 +250,15 @@ def open_camera():
     raise RuntimeError("Camera gives no frames")
 
 
-def read_frame(cap):
+def read_frame(cap, timeout=FRAME_TIMEOUT):
+    # Looping forever here would keep a running speedL going (unplugged camera)
+    deadline = time.time() + timeout
     while True:
         ok, frame = cap.read()
         if ok:
             return frame
+        if time.time() > deadline:
+            raise RuntimeError(f"no frame from camera {OVERHEAD_CAMERA_INDEX} for {timeout} s")
 
 
 def draw_base_axes(image, K, T_base_cam, origin_z, length=0.1):
@@ -383,11 +401,17 @@ class GlassFinder:
         pixels, _ = cv2.projectPoints(points, rvec, T_cam_base[:3, 3], self.K, None)
         return pixels.reshape(-1, 2).astype(np.int32)
 
-    def measure(self, cap, frames=MEASURE_FRAMES):
-        """Glasses found consistently over several frames, positions averaged (median)."""
+    def measure(self, cap, frames=MEASURE_FRAMES, kick=None):
+        """Glasses found consistently over several frames, positions averaged (median).
+
+        kick: called after every frame (RobotWatchdog.kick), this blocks for ~0.5 s.
+        """
         clusters = []   # lists of Glass belonging to the same physical glass
         for _ in range(frames):
-            for g in self.detect(self.undistort(read_frame(cap))):
+            frame = read_frame(cap)
+            if kick:
+                kick()
+            for g in self.detect(self.undistort(frame)):
                 for cluster in clusters:
                     ref = cluster[0]
                     if np.hypot(g.x - ref.x, g.y - ref.y) < ref.diameter / 4:
@@ -812,9 +836,14 @@ def calibrate(args):
     points, pending = load_progress(width, height, args.fresh)
     freedrive = False
     status = "Robot out of view, SPACE / A: measure tags"
+    watchdog = RobotWatchdog(rtde_c)
     try:
         while True:
             image = undistort(read_frame(cap))
+            if not watchdog.kick():
+                jogger.stop()
+                freedrive = False   # the new control script is not in teach mode
+                status = "Robot was stopped (loop stall / protective stop)"
             visible = tag_centers(detector, image)
             for tag_id, c in visible.items():
                 cv2.drawMarker(image, c.astype(int), (0, 255, 255), cv2.MARKER_CROSS, 20, 2)
@@ -861,7 +890,9 @@ def calibrate(args):
                     jogger.stop()   # measuring blocks the loop for a moment
                     samples = {}
                     for _ in range(CALIB_FRAMES):
-                        for tag_id, c in tag_centers(detector, undistort(read_frame(cap))).items():
+                        frame = read_frame(cap)
+                        watchdog.kick()
+                        for tag_id, c in tag_centers(detector, undistort(frame)).items():
                             samples.setdefault(tag_id, []).append(c)
                     pending = [(tag_id, np.median(s, axis=0)) for tag_id, s in sorted(samples.items())
                                if len(s) >= CALIB_FRAMES // 2]
@@ -870,9 +901,14 @@ def calibrate(args):
                         status = "No tags found"
                 elif key == "c":
                     if len(points) < MIN_POINTS:
-                        status = f"Need at least {MIN_POINTS} points"
+                        status = warn(f"Need at least {MIN_POINTS} points, have {len(points)}")
                         continue
-                    T_base_cam, max_mm = solve_camera_pose(points, undistort.K)
+                    try:
+                        T_base_cam, max_mm = solve_camera_pose(points, undistort.K)
+                    except (RuntimeError, TypeError, cv2.error) as e:
+                        # Degenerate points (e.g. all in a line); the progress file is kept
+                        status = warn(f"Solving failed ({e}), add or fix points")
+                        continue
                     table_z = min(b[2] for _, b in points)
                     np.savez(POSE_FILE, T_base_cam=T_base_cam, table_z=table_z,
                              image_size=np.array([width, height]),
@@ -909,12 +945,16 @@ def run(args):
     setup_window(editor)
     status = ("p: measure  " + ("m: move above glass  s: stop  t: tip as corner  " if args.robot else "")
               + "area: drag / u: undo / x: clear   q: quit")
+    watchdog = RobotWatchdog(rtde_c) if rtde_c else None
     try:
         while True:
             if window_closed():
                 break
             read_trackbars(finder)
             image = finder.undistort(read_frame(cap))
+            if watchdog and not watchdog.kick():
+                jogger.stop()
+                status = "Robot was stopped (loop stall / protective stop)"
             glasses = finder.detect(image)
             tip_xy = rtde_r.getActualTCPPose()[:2] if rtde_r else None
             draw_overlay(image, finder, editor, glasses, status, tip_xy)
@@ -926,23 +966,27 @@ def run(args):
             if "q" in keys or "\x1b" in keys:
                 break
             for key in keys:
-                if key == "t" and rtde_r:
+                if key in ("t", "s", "m") and not rtde_c:
+                    status = warn(f"{key} needs --robot, ignored")
+                elif key == "t":
                     editor.add_point(rtde_r.getActualTCPPose()[:2])
                 elif key == "u":
                     editor.undo()
                 elif key == "x":
                     editor.clear()
-                elif key == "s" and rtde_c:
+                elif key == "s":
                     jogger.stop()
                     rtde_c.stopL(1.0)
                 elif key in ("p", "m"):
                     if jogger:
                         jogger.stop()   # measuring blocks the loop for a moment
-                    measured = finder.measure(cap)
+                    measured = finder.measure(cap, kick=watchdog.kick if watchdog else None)
                     print(f"\n{len(measured)} glasses (base frame, rim z = {finder.rim_z * 1000:.0f} mm):")
                     for g in measured:
                         print(f"  x {g.x * 1000:7.1f}  y {g.y * 1000:7.1f} mm   diameter {g.diameter * 1000:.0f} mm")
-                    if key == "m" and rtde_c and measured:
+                    if key == "m" and not measured:
+                        status = warn("no glass found, m ignored")
+                    elif key == "m":
                         c = np.array([width / 2, height / 2])
                         g = min(measured, key=lambda g: np.linalg.norm(np.array(g.pixel[:2]) - c))
                         tcp = rtde_r.getActualTCPPose()

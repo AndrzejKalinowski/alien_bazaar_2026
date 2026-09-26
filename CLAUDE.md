@@ -12,6 +12,7 @@ Hackathon code (Alien Bazaar 2026, team Rabyte) for a **UR5e robot arm with a cu
 - **All motion goes through `safe_motion.SafeControl`.** Do not construct `RTDEControlInterface` directly in new code. A new motion command must get a ceiling check there; until it has one, it stays in `UNCHECKED_MOTION`.
 - **Do not loosen safety limits silently.** This covers `MIN_TCP_Z`, `MAX_TCP_Z`, `MAX_OVERSHOOT`, `CONTACT_FORCE`/`PLACE_FORCE`, speed and acceleration constants, `CAMERA_TIMEOUT` and tilt checks. If a change needs it, say so explicitly.
 - **Always pass a non-zero time to `speedL`** (`SPEED_CMD_TIME = 0.02`). `time=0` makes the robot protective-stop (C271A1). `speedL` keeps moving until the next command or `speedStop`. Never add code that blocks the main loop while a `speedL` is active; call `jogger.stop()` / `speedStop()` first.
+- **Motion watchdog:** robot main loops create `RobotWatchdog(rtde_c)` right before the loop and call `watchdog.kick()` once per iteration (False = robot was stopped, abort the task). No blocking `moveJ`/`moveL` in those loops (use `async=True`), nothing else that blocks > 0.2 s without kicking, and call `watchdog.arm()` after every `reuploadScript()`.
 - Every exit path must stop motion: keep the `try/finally` blocks that call `speedStop` / `stopL` / `stopScript`.
 
 ## Layout
@@ -22,6 +23,7 @@ Hackathon code (Alien Bazaar 2026, team Rabyte) for a **UR5e robot arm with a cu
   - `safe_motion.py`: `SafeControl`, the motion controller. It wraps `RTDEControlInterface` and enforces the `MAX_TCP_Z` ceiling on `moveL`, `moveJ` and `speedL`. Connect with `r, c = safe_motion.connect(IP)`, never with `rtde_control` directly.
   - `follow_april_tag.py`: wrist-camera tag picker **and the de facto shared module**: `IP`, `HOME_Q`, `MIN/MAX_TCP_Z`, `TAG_DICTIONARY`, `TAG_SIZE`, `pose_to_matrix`, `Camera`, `TagDetector`, `connect_suction`. Importing it has side effects (it loads `hand_eye.npz` and needs `ur_rtde`).
   - `gamepad_jog.py`: `GamepadControl` (button → key edges, stick → speed vector), `Jogger`.
+  - `robot_watchdog.py`: `RobotWatchdog`, the RTDE watchdog that stops the robot when a main loop stalls.
   - `suction.py`: host driver for the gripper serial protocol.
   - `hand_eye_calibration.py`, `calibrate_camera.py`: calibration tools that write the `.npz` files.
   - `bus_servos.py`: Feetech STS bus servos (not integrated with the robot yet).
@@ -53,6 +55,7 @@ There are no tests yet. For robot logic without hardware, URSim can run in Docke
 - **Units:** metres, seconds and radians internally. Degree constants end in `_DEG`. UR poses are `[x, y, z, rx, ry, rz]` with an **axis-angle** rotation. Convert with `pose_to_matrix()` / `cv2.Rodrigues`. Homogeneous transforms are named `T_<to>_<from>` (e.g. `T_base_cam`, `T_tcp_cam`, `T_cam_tag`) and compose left to right: `T_base_tag = T_base_tcp @ T_tcp_cam @ T_cam_tag`.
 - **UI loop pattern:** one loop per video frame: read frame → detect → step the task (`task.update()`) → draw → `cv2.imshow` → read keys (`read_keys()` merges gamepad button edges and `cv2.waitKey`). Long actions are tasks that return quickly each step. Gamepad buttons are mapped to the same key characters as the keyboard (`GAMEPAD_KEYS = {"BTN_NORTH": "p", ...}`).
 - **Manual override:** any stick input aborts the running task. Keep this in new tasks.
+- **Refuse, don't stop:** an operator command that can't be carried out right now (busy gripper, task running, nothing detected, bad calibration points, gripper not responding) is refused with `warn(...)` (prints `WARNING: …`, returns the status line for the window) and the loop keeps running. Never block the loop waiting for it, and never let it raise out of the main loop. Genuine safety stops (watchdog, force limits, e-stop) still stop motion. `suction.key_command()` handles the g / r keys this way; `Suction.grip()` / `release()` return False instead of waiting while a release pulse runs.
 - **Persisted files** are written atomically (write `*.tmp`, then `os.replace`), and paths are built relative to `os.path.dirname(__file__)`.
 - Comments explain *why* (hardware quirks, measured values, protocol details), not what. Keep that style and density.
 - Firmware: `namespace {}` for file-local state, `constexpr` constants with measured justification in comments, non-blocking `loop()` built from `update*()` functions.
