@@ -61,7 +61,7 @@ The real bug was that `Suction.grip()` always cleared `_grip_result`, even when 
 In `find_glasses.py` it is the height of the circle seen for *upright* glasses. `pick_place_glasses.py` reuses `fg.RIM_HEIGHT` as the *full height of an upside-down glass* (where the cup lands, and the carry height is computed as 2 × `RIM_HEIGHT` + clearance). Tuning it for one script silently changes the other.
 *Fix:* give `pick_place_glasses.py` its own `GLASS_HEIGHT` and build the `GlassFinder` with it (add a `rim_height` parameter to `GlassFinder.load`).
 
-**9. The place target defaults to "lowest tag id in view"**
+**9. The place target defaults to "lowest tag id in view"** *Partly done on branch `fix/audit`: the chosen id is drawn next to the place marker, and p warns (without refusing) when several tags are in view. `PLACE_TAG_ID` stays `None` on purpose: the demo tag's id is not known in advance and may change.*
 [pick_place_glasses.py:51](ur5e_experiments/pick_place_glasses.py#L51) `PLACE_TAG_ID = None`. The overhead calibration uses the same tag family, so a calibration tag left on the table can become the place target.
 *Fix:* set an explicit id for the demo, and draw the id next to the "place" marker.
 

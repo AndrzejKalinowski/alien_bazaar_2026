@@ -36,7 +36,9 @@ Keys (video window) / gamepad:
 
 The place tag (PLACE_TAG_ID, any 36h11 size) lies flat on the table inside
 the camera view; its last seen position is kept, since the placed glass covers
-it. It is shown as a cyan square in the video and on the map.
+it. It is shown as a cyan square in the video (with its id) and on the map.
+With PLACE_TAG_ID = None the lowest id in view is used; p warns when more
+than one tag is in view (e.g. a calibration tag left on the table).
 
 Motion watchdog (robot_watchdog.py): the robot stops by itself if the main
 loop sends nothing for 0.2 s (stalled loop, camera hang, breakpoint). The
@@ -251,14 +253,14 @@ class PickPlaceTask(Task):
 
 
 def find_place_tag(detector, finder, image):
-    """Base x, y of the place tag's center on the table, or None."""
+    """(base x, y of the place tag's center on the table, its id, all ids in view), or None."""
     centers = fg.tag_centers(detector, image)
     ids = [PLACE_TAG_ID] if PLACE_TAG_ID is not None else sorted(centers)
     for tag_id in ids:
         if tag_id in centers:
             p = fg.pixel_to_plane(finder.K, finder.T_base_cam, centers[tag_id], finder.table_z)
             if p is not None:
-                return p[:2]
+                return p[:2], tag_id, sorted(centers)
     return None
 
 
@@ -269,7 +271,7 @@ def choose_glass(glasses, place_xy):
     return min(free, key=lambda g: np.hypot(g.x - place_xy[0], g.y - place_xy[1]), default=None)
 
 
-def draw_place(image, finder, place_xy, seen):
+def draw_place(image, finder, place_xy, tag_id, seen):
     T_cam_base = np.linalg.inv(finder.T_base_cam)
     rvec, _ = cv2.Rodrigues(T_cam_base[:3, :3])
     point = np.array([[place_xy[0], place_xy[1], finder.table_z]])
@@ -277,7 +279,8 @@ def draw_place(image, finder, place_xy, seen):
     p = tuple(int(v) for v in pixel.ravel())
     color = (255, 255, 0) if seen else (160, 160, 0)
     cv2.drawMarker(image, p, color, cv2.MARKER_SQUARE, 30, 2)
-    cv2.putText(image, "place" if seen else "place (last seen)", (p[0] + 18, p[1] + 5),
+    label = f"place: tag {tag_id}" + ("" if seen else " (last seen)")
+    cv2.putText(image, label, (p[0] + 18, p[1] + 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
 
@@ -297,6 +300,8 @@ def main():
 
     task = None
     place_xy = None
+    place_id = None
+    tags_in_view = []
     status = "p: pick & place  s: stop  g/r: grip/release  h: home  q: quit"
     watchdog = RobotWatchdog(c)
     try:
@@ -314,7 +319,7 @@ def main():
             glasses = finder.detect(image)
             seen = find_place_tag(detector, finder, image)
             if seen is not None:
-                place_xy = seen
+                place_xy, place_id, tags_in_view = seen
             tcp = r.getActualTCPPose()
 
             if task is not None:
@@ -325,7 +330,7 @@ def main():
 
             fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2], place_xy)
             if place_xy is not None:
-                draw_place(image, finder, place_xy, seen is not None)
+                draw_place(image, finder, place_xy, place_id, seen is not None)
             cv2.imshow(fg.WINDOW, image)
 
             if gamepad.jog_speed() is not None and task is not None:
@@ -368,6 +373,9 @@ def main():
                         status = warn(f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} "
                                       "in view, p ignored")
                         continue
+                    if PLACE_TAG_ID is None and len(tags_in_view) > 1:
+                        # Not refused: the id of the place tag is not fixed, so the lowest wins
+                        warn(f"tags {tags_in_view} in view, placing on the lowest id {place_id}")
                     status = "measuring..."
                     glass = choose_glass(finder.measure(cap, kick=watchdog.kick), place_xy)
                     if glass is None:
