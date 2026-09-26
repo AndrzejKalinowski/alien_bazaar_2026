@@ -47,7 +47,7 @@ The real bug was that `Suction.grip()` always cleared `_grip_result`, even when 
 
 ### Medium
 
-**5. Gripper README said the release pulse was 500 ms; the code uses 1500 ms**. *Fixed in this pass.* [Gripper/src/main.cpp:13](Gripper/src/main.cpp#L13) is `RELEASE_PULSE_MS = 1500`, and `suction.py` / `pick_place_glasses.py` (`RELEASE_TIME = 1.7`) rely on 1.5 s.
+**5. Gripper README said the release pulse was 500 ms; the code uses 1500 ms**. *Fixed in this pass; on branch `fix/audit` all docs checked (1.5 s everywhere), and Gripper/README.md now names the host constants that mirror the pulse length.* [Gripper/src/main.cpp:13](Gripper/src/main.cpp#L13) is `RELEASE_PULSE_MS = 1500`, and `suction.py` / `pick_place_glasses.py` (`RELEASE_TIME = 1.7`) rely on 1.5 s.
 
 **6. The firmware cannot detect a failed pressure reading mid-run**
 [Gripper/README.md](Gripper/README.md) says `HOLD`/`PRESSURE` return `ERR NO_SENSOR` "if … a reading fails". In the code, `NaN` only happens when the sensor is missing at boot. `Adafruit_BMP085::readPressure()` returns an integer and does not report I2C errors. A loose I2C wire during the demo therefore produces garbage pressure, which can trigger a false `GRIP OK` or `GRIP LOST`.
