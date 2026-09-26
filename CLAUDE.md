@@ -19,7 +19,9 @@ Hackathon code (Alien Bazaar 2026, team Rabyte) for a **UR5e robot arm with a cu
 
 - `ur5e_experiments/`: all robot code. Flat scripts, no package. Run from this directory (imports are sibling-module imports).
   - `pick_place_glasses.py`: main demo (generator-based `Task`s stepped once per video frame).
-  - `find_glasses.py`: `GlassFinder` (Hough circles + HSV rim filter + back-projection to base frame), `AreaEditor`, overhead-camera calibration (`--calibrate`). It is both a tool and a library.
+  - `find_glasses.py`: `GlassFinder` (Hough circles + HSV rim filter + back-projection to base frame; diff mode with the two modules below), `AreaEditor`, overhead-camera calibration (`--calibrate`). It is both a tool and a library.
+  - `table_background.py`: `TableBackground`, the empty-table model and per-frame change mask (auto-exposure gain, shadow suppression, slow adaptation, stale check). No robot code.
+  - `glass_classifier.py`: glasses upright / upside down (`UP`, `DOWN`, `UNSURE`) and other objects from the change mask, by fitting a truncated cone (`GlassShape`) to the circles in each blob. No robot code.
   - `safe_motion.py`: `SafeControl`, the motion controller. It wraps `RTDEControlInterface` and enforces the `MAX_TCP_Z` ceiling on `moveL`, `moveJ` and `speedL`. Connect with `r, c = safe_motion.connect(IP)`, never with `rtde_control` directly.
   - `follow_april_tag.py`: wrist-camera tag picker **and the de facto shared module**: `IP`, `HOME_Q`, `MIN/MAX_TCP_Z`, `TAG_DICTIONARY`, `TAG_SIZE`, `pose_to_matrix`, `Camera`, `TagDetector`, `connect_suction`. Importing it has side effects (it loads `hand_eye.npz` and needs `ur_rtde`).
   - `gamepad_jog.py`: `GamepadControl` (button → key edges, stick → speed vector), `Jogger` (needs the Z limits and the current TCP pose, so every script jogs with the same ceiling / floor guard), `limit_z_speed`.
@@ -66,13 +68,13 @@ The tests (`ur5e_experiments/tests`, `hoverboard_experiments/tests`) cover the p
 ## Cross-file contracts (change together)
 
 - **Gripper serial protocol:** `Gripper/src/main.cpp` ↔ `ur5e_experiments/suction.py` ↔ `Gripper/README.md`. Timings that are mirrored in Python: `RELEASE_PULSE_MS` = 1500 ↔ `RELEASE_TIMEOUT`, and `RELEASE_TIME` in `pick_place_glasses.py`. `GRIP_CONFIRM_TIMEOUT_MS` = 8000 ↔ `GRIP_RESULT_TIMEOUT` and the tasks' `GRIP_CONFIRM_TIMEOUT` (6 s). `GRIP UNKNOWN` also comes mid-grip when the sensor fails (`SENSOR_LOST_MS` = 500). The unsolicited `GRIP OK/FAIL/LOST/UNKNOWN` lines are parsed in `Suction._read_lines`.
-- **Calibration files** (all 1280×720, all relative to the TCP set on the pendant at the suction-cup tip): the `camera_calibration.npz` and `overhead_camera_calibration.npz` keys `camera_matrix`, `dist_coeffs`, `image_size`; the `hand_eye.npz` key `T_tcp_cam`; the `overhead_camera_pose.npz` keys `T_base_cam`, `table_z`, `image_size`, `pixels`, `base_points`. Do not change these keys without updating every reader.
-- **`find_glasses.py` is imported by `pick_place_glasses.py`** (`fg.setup_window`, `fg.read_trackbars`, `fg.draw_overlay`, `fg.read_frame`, `GlassFinder` (`load(width, height, rim_height=...)`), `AreaEditor`, `tag_centers`, `pixel_to_plane`). Keep those names stable.
+- **Calibration files** (all 1280×720, all relative to the TCP set on the pendant at the suction-cup tip): the `camera_calibration.npz` and `overhead_camera_calibration.npz` keys `camera_matrix`, `dist_coeffs`, `image_size`; the `hand_eye.npz` key `T_tcp_cam`; the `overhead_camera_pose.npz` keys `T_base_cam`, `table_z`, `image_size`, `pixels`, `base_points`; the `table_background.npz` keys `background`, `noise`, `image_size`, `T_base_cam`, `diff_scale` (refused when `T_base_cam` or `DIFF_SCALE` changed). Do not change these keys without updating every reader.
+- **`find_glasses.py` is imported by `pick_place_glasses.py`** (`fg.setup_window`, `fg.read_trackbars`, `fg.draw_overlay`, `fg.read_frame`, `GlassFinder` (`load(width, height, rim_height=..., mouth_diameter=..., foot_diameter=...)`, `.mode`, `.change`, `.objects`), `AreaEditor`, `tag_centers`, `pixel_to_plane`, `DIFF`, `DIFF_KEYS`, `diff_key`). Keep those names stable. `Glass.orientation` is `None` in classic mode and `"up"` / `"down"` / `"?"` in diff mode; `pick_place_glasses.choose_glass` relies on that.
 - **`follow_april_tag.py` constants are imported by 4 scripts.** Renaming them breaks the others.
 
 ## Don't
 
-- Don't commit or delete the calibration data (`*.npz`, `detection_*.json`, `overhead_calibration_points.json`) without asking. It takes robot time to recreate.
+- Don't commit or delete the calibration data (`*.npz` incl. `table_background.npz`, `detection_*.json`, `overhead_calibration_points.json`) without asking. It takes robot time to recreate. Tests must not write into `ur5e_experiments/`: point the module's file constants at `tmp_path` (the `path=None` defaults are resolved at call time for that).
 - Don't add `Gripper/.pio/` build output to commits (it is ignored, but old artifacts are still tracked; see AUDIT.md #14).
 - Don't introduce ROS or other heavy frameworks. The stack is deliberately `ur_rtde` + OpenCV + pyserial.
 - Don't assume COM ports or camera indices. They are machine-specific and set in the constants (see README §14).

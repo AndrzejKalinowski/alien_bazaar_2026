@@ -52,6 +52,8 @@ flowchart LR
     subgraph PC["Laptop (Windows, Python 3.12)"]
         PP["pick_place_glasses.py"]
         FG["find_glasses.py<br/>GlassFinder, AreaEditor"]
+        TB["table_background.py<br/>empty-table diff"]
+        GC["glass_classifier.py<br/>up / down / objects"]
         FAT["follow_april_tag.py<br/>shared constants, Camera, TagDetector"]
         JOG["gamepad_jog.py<br/>GamepadControl, Jogger"]
         SUC["suction.py<br/>Suction"]
@@ -61,6 +63,8 @@ flowchart LR
         PP --> SUC
         FG --> FAT
         FG --> JOG
+        FG --> TB
+        FG --> GC
     end
     OC["Overhead camera"] -- USB --> FG
     GP["Gamepad"] -- USB --> JOG
@@ -86,6 +90,8 @@ alien_bazaar_2026/
 ├── ur5e_experiments/                  ← everything that runs the robot
 │   ├── pick_place_glasses.py          ★ main demo: overhead camera → pick glass → place on tag
 │   ├── find_glasses.py                ★ glass detection + overhead-camera calibration (library + tool)
+│   ├── table_background.py            empty-table model and change mask (diff mode)
+│   ├── glass_classifier.py            glasses up / down and other objects from the change mask
 │   ├── follow_april_tag.py            wrist-camera AprilTag picker; also the shared-constants hub
 │   ├── hand_eye_calibration.py        automatic wrist camera ↔ TCP calibration
 │   ├── calibrate_camera.py            lens calibration with a ChArUco board (either camera)
@@ -104,6 +110,7 @@ alien_bazaar_2026/
 │   ├── overhead_calibration_points.json  touched calibration points, resumable (generated)
 │   ├── detection_area.json            table polygon where glasses count (generated, editable)
 │   ├── detection_settings.json        detection trackbar values (generated)
+│   ├── table_background.npz           the empty table for diff mode (generated with b)
 │   └── README.md                      URSim notes
 │
 ├── Gripper/                           ← PlatformIO firmware for the XIAO ESP32-C3 suction controller
@@ -204,7 +211,8 @@ Chains used in the code:
 | `overhead_camera_pose.npz` | `T_base_cam`, `table_z`, `image_size`, the points used | `find_glasses.py --calibrate` | `find_glasses.py`, `pick_place_glasses.py` |
 | `overhead_calibration_points.json` | pixel ↔ base point pairs, plus tags still to touch. Plain JSON, resumable | `find_glasses.py --calibrate` | the same, on restart |
 | `detection_area.json` | polygon in **base x, y** where glasses are accepted. It survives camera recalibration | the mouse / the `t` key in `find_glasses.py` or `pick_place_glasses.py` | `GlassFinder` |
-| `detection_settings.json` | trackbar values: edge, roundness %, max saturation, min brightness | trackbars (saved automatically) | `GlassFinder` |
+| `detection_settings.json` | trackbar values: edge, roundness %, max saturation, min brightness, diff | trackbars (saved automatically) | `GlassFinder` |
+| `table_background.npz` | `background` (BGR at `DIFF_SCALE`), `noise` (per pixel: L, a, b, gradient), `image_size`, `T_base_cam`, `diff_scale`. Refused after a new overhead calibration | **b** in `find_glasses.py` or `pick_place_glasses.py`, with the table empty | `GlassFinder` (diff mode) |
 
 All calibrations are **only valid at 1280×720**. `find_glasses.py` refuses a pose file recorded at a different resolution, and the intrinsics are rescaled with a warning.
 
@@ -256,6 +264,7 @@ python find_glasses.py --robot
 - Drag on empty space to draw a rectangle. Drag a corner to move it, click an edge to add a corner, right-click a corner to delete it. **t / B** adds the current tip x, y as a corner. **u** undoes, **x** clears.
 - Tune the trackbars until only glasses are green. Rejected circles are drawn in red with the reason (`colour S…` / `dark V…`).
 - **p / X** prints the measured glass positions. **m / Y** moves the tip 5 cm above the glass nearest the image centre, **to check the calibration visually**.
+- **Diff mode** (recommended): clear the table, move the robot out of view and press **b**. From then on only what differs from the empty table is searched, and each glass is marked **UP** (blue), **DOWN** (green) or **?** (orange, undecided). **v** shows the change mask; tune the **diff** trackbar until the glasses are filled in and the empty mat stays clear. Measure your glasses and set `GLASS_MOUTH_DIAMETER` / `GLASS_FOOT_DIAMETER` (and `GLASS_HEIGHT`) in `pick_place_glasses.py`. See [§9.1](#91-diff-mode-empty-table-difference-and-orientation).
 
 ---
 
@@ -269,12 +278,12 @@ All robot scripts connect to `IP = "192.168.1.20"`. **Keep a hand near the e-sto
 python pick_place_glasses.py
 ```
 
-Needs: the overhead calibration (steps 1, 3 and 4), the suction gripper on `COM9` (optional, see below), an AprilTag lying flat in view as the **place target**, and **upside-down** glasses in the detection area.
+Needs: the overhead calibration (steps 1, 3 and 4), the suction gripper on `COM9` (optional, see below), an AprilTag lying flat in view as the **place target**, and glasses in the detection area: **upside down**, or also **upright** with the side grip (`PICK_FROM_SIDE`) in diff mode. For diff mode, press **b** once with the table empty (tag already in place) and the robot out of view.
 
 Press **p / Y** to run one full cycle:
 
 1. Measure the glasses (median over 15 frames) and the place tag. The last seen tag position is kept, because the placed glass covers the tag.
-2. Choose the free glass **closest to the tag** (glasses within 4 cm of the tag count as already placed).
+2. Choose the free glass **closest to the tag** (glasses within 4 cm of the tag count as already placed). In diff mode it skips (and prints why) glasses whose orientation is unclear, upright ones when gripping from the top, and ones with an obstruction (arm, hand) within 5 cm. The side grip radius follows the orientation: upside down the wide mouth is low, upright the narrow foot.
 3. Go up to the carry height, over the glass, then down to 2 cm above the foot. Turn the vacuum on and descend at 15 mm/s until the force is **> 10 N** (or 15 mm past the expected height). Wait for `GRIP OK` (at most 6 s; otherwise release and back off).
 4. Lift, carry over the tag (watching for `GRIP LOST`), lower, descend until **> 8 N**, release and wait 1.7 s.
 5. Go back up and return to the start pose, out of the camera's view.
@@ -297,9 +306,10 @@ It can also be used as a library:
 ```python
 from find_glasses import GlassFinder, open_camera
 cap, w, h = open_camera()
-finder = GlassFinder.load(w, h)
-for g in finder.measure(cap):          # Glass(x, y, z, diameter, pixel, saturation, brightness)
-    print(g.x, g.y, g.diameter)
+finder = GlassFinder.load(w, h, rim_height=0.075, mouth_diameter=0.08, foot_diameter=0.06)
+for g in finder.measure(cap):          # Glass(x, y, z, diameter, pixel, saturation, brightness, orientation, ...)
+    print(g.x, g.y, g.diameter, g.orientation)   # orientation: "up" / "down" / "?" (diff mode), None (classic)
+print(finder.objects)                  # diff mode: other things on the table ("unknown" / "obstruction")
 ```
 
 ### 7.3 `follow_april_tag.py`: wrist-camera tag picker
@@ -353,12 +363,12 @@ Keyboard keys work when the OpenCV video window has focus. Gamepad buttons use X
 | Grip (vacuum on) | **g / B** | **g / B** | – | – |
 | Release | **r / X** | **r / X** | – | – |
 | Home | **h / Start** | **h / Start** | – | – |
-| Other | – | – | **t / B** tip → area corner, **u** undo, **x** clear area | **n / X** skip, **f / B** freedrive, **c / Y** solve |
+| Other | **o** side grip constants, **b** empty table, **d** diff / classic, **v** change mask | – | **t / B** tip → area corner, **u** undo, **x** clear area, **b** / **d** / **v** as in `pick_place_glasses` | **n / X** skip, **f / B** freedrive, **c / Y** solve |
 | Quit | **q / Esc** | **q / Esc** | **q / Esc** | **q / Esc** |
 
 Home is `HOME_Q = [0, -1.57, 1.57, -1.57, -1.57, 0]` (tool pointing down).
 
-A key that can't be carried out right now is **refused with a `WARNING`** in the console and the video window, and the program keeps running. Examples: **g** during the 1.5 s release pulse after **r** (press it again a moment later), **g** / **p** / **h** while a task runs (**s** stops it first), **p** with no glass or place tag in view, a gripper that stopped responding. A pick task that reaches the glass during a release pulse waits for it to end.
+A key that can't be carried out right now is **refused with a `WARNING`** in the console and the video window, and the program keeps running. Examples: **g** during the 1.5 s release pulse after **r** (press it again a moment later), **g** / **p** / **h** / **b** while a task runs (**s** stops it first), **p** with no glass or place tag in view, no glass that can be picked or a stale table background, **d** before any **b**, a gripper that stopped responding. A pick task that reaches the glass during a release pulse waits for it to end.
 
 ---
 
@@ -376,6 +386,20 @@ Glasses are transparent, so they are found by the **bright ring of their rim/foo
 8. **`measure()`**: repeat over 15 frames, cluster by position (within ¼ diameter), keep clusters seen in ≥ 50 % of frames, return the median.
 
 For the upside-down glasses of the pick-and-place demo, the visible circle is the **foot**, so `pick_place_glasses.py` uses its own `GLASS_HEIGHT` (the **full glass height**, which is also where the cup lands) instead of `RIM_HEIGHT`. The two are separate constants, so tuning `find_glasses.py` does not change the demo.
+
+That is the **classic** mode, used while there is no table background.
+
+### 9.1 Diff mode: empty-table difference and orientation
+
+[table_background.py](ur5e_experiments/table_background.py) and [glass_classifier.py](ur5e_experiments/glass_classifier.py); the details are in their docstrings.
+
+1. **Empty table** (**b**): median of 30 frames at half resolution, plus each pixel's noise. Saved to `table_background.npz` with the camera pose.
+2. **Change mask**, every frame: brightness, colour and texture (gradient) compared with the empty table, each in units of the pixel's noise (**diff** trackbar, default 6σ). The webcam's auto exposure / white balance cannot be locked, so the overall gain and colour offset are measured and taken out first. Shadows (darker, same colour) are compared with a darkened background, so they don't count, but a glass inside a shadow still does (by its texture). Specks are removed, gaps closed, holes filled. Unchanged pixels slowly follow the light (not while an obstruction is in view). More than 40 % of the area changed, or a gain outside 0.5–2 → **stale**, nothing is reported.
+3. **Circles only inside the changed blobs** (HoughCircles), each refined to sub-pixel on its rim edges, and kept only if most of the ring is on changed pixels.
+4. **Orientation**: a glass is a truncated cone (`GLASS_HEIGHT`, `GLASS_MOUTH_DIAMETER`, `GLASS_FOOT_DIAMETER`). Its top circle is at the full height either way: the mouth when upright, the foot when upside down. Each pair of circles (and each single one) is back-projected as both orientations and scored: both centres on one axis (parallax shifts the top circle ~2 cm at 30 cm off-centre), the diameters of both ends (right under the camera the wrong height gives ~8 % wrong size), and the predicted outline on changed pixels. The difference of the two scores is the confidence; below `MIN_ORIENTATION_MARGIN` the glass is **?** and not picked. `measure()` needs 70 % of its frames to agree.
+5. **Other objects**: what the glasses don't explain is **unknown** (gray) or **obstruction** (red: touching the image border or bigger than 300 cm², e.g. the arm).
+
+On synthetic scenes (tests) this gives no wrong orientation; glasses right under the camera, where only the ~8 % size difference is left, are sometimes **?**. Tune on the real glasses: `p` prints each glass's orientation and margin.
 
 ---
 
@@ -472,7 +496,7 @@ The settings are module-level constants (UPPER_CASE, units in comments) at the t
 | Wrist camera index | `follow_april_tag.py` (`CAMERA_INDEX`) | `0` |
 | Overhead camera index | `find_glasses.py` (`OVERHEAD_CAMERA_INDEX`) | `2` |
 | AprilTag size (wrist picker, hand-eye) | `follow_april_tag.py` (`TAG_SIZE`) | 0.08 m |
-| Glass geometry | `find_glasses.py` (`RIM_HEIGHT`, `GLASS_MIN/MAX_DIAMETER`), `pick_place_glasses.py` (`GLASS_HEIGHT`) | 0.075, 0.05–0.10 m, 0.075 m |
+| Glass geometry | `find_glasses.py` (`RIM_HEIGHT`, `GLASS_MIN/MAX_DIAMETER`, `GLASS_MOUTH/FOOT_DIAMETER`), `pick_place_glasses.py` (`GLASS_HEIGHT`, `GLASS_MOUTH/FOOT_DIAMETER`) | 0.075, 0.05–0.10 m, 0.08 / 0.06 m (placeholders, measure yours), 0.075 m |
 | Place tag | `pick_place_glasses.py` (`PLACE_TAG_ID`) | `None` = lowest id in view |
 | Motion speeds / forces | top of `pick_place_glasses.py`, `follow_april_tag.py`, `gamepad_jog.py` | see files |
 
@@ -490,7 +514,10 @@ To find COM ports: Device Manager → Ports, or `python -m serial.tools.list_por
 | Wrong camera opens / "calibrated at … but camera gives …" | Windows renumbered the USB cameras. Run `python calibrate_camera.py --list-cameras`: it shows every index with the role the scripts give it. Change `CAMERA_INDEX` / `OVERHEAD_CAMERA_INDEX` to match. Both cameras are 1280×720, so a swap is **not** detected otherwise: each camera silently uses the other's calibration |
 | Glass positions consistently off by a few mm to cm | Wrong `RIM_HEIGHT` (`GLASS_HEIGHT` in the pick-and-place demo) for the kind of glass, the camera was bumped (redo step 3), or the TCP changed on the pendant |
 | Tag "base" position drifts while jogging (wrist camera) | Bad `hand_eye.npz` or intrinsics. Redo steps 1–2, and check `TAG_SIZE` |
-| Circles on everything | Raise `roundness %` / `edge`, lower `max saturation`, shrink the detection area, use a dark matte mat |
+| Circles on everything | Raise `roundness %` / `edge`, lower `max saturation`, shrink the detection area, use a dark matte mat. Or use diff mode (**b** with the table empty) |
+| Diff mode: "BACKGROUND STALE" in red | The camera moved, the light changed a lot, or something big stands in the area. Clear the table, robot out of view, press **b** |
+| Diff mode: specks on the empty mat / glasses not filled in | **v** shows the mask. Raise / lower the **diff** trackbar. Specks that stay: capture the background again (**b**) |
+| Diff mode: glasses often **?** or the wrong way round | Check `GLASS_HEIGHT` / `GLASS_MOUTH_DIAMETER` / `GLASS_FOOT_DIAMETER` against the real glasses. Glasses right under the camera are the hardest (no parallax); a little off-centre is easier |
 | Grip always times out | Check `python suction.py` and the COM port. `GRIP FAIL` means the seal never reached 180 hPa: the cup or glass surface is dirty or wet, or the approach is off-centre. A `GRIP` while the vacuum is already on is answered with `ERR BUSY` and is harmless: the grip session and its last result stay as they are |
 | "Suction gripper not available, running without it" | `COM9` is missing, or the port is busy (a serial monitor is still open?) |
 | Gamepad does nothing | `No gamepad found, keyboard only` is printed at start. Plug it in before starting the script |
