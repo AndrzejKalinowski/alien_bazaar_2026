@@ -9,7 +9,8 @@ After GRIP the controller reports whether an object was picked up, based on
 the vacuum measured by its pressure sensor: "GRIP OK" when the object is held,
 "GRIP FAIL" if nothing is held within 8 s (the vacuum stays on, and "GRIP OK"
 can still follow), "GRIP LOST" if the object drops while gripping, and
-"GRIP UNKNOWN" if the sensor is missing.
+"GRIP UNKNOWN" if the sensor is missing or stops giving valid readings
+while gripping (the tasks then carry on blind, as without a sensor).
 
 RELEASE fires a 1.5 s release pulse and replies "DONE RELEASE" when it ends.
 During the pulse the controller answers GRIP and RELEASE with "ERR BUSY", so

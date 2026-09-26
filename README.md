@@ -373,7 +373,7 @@ Firmware: [Gripper/src/main.cpp](Gripper/src/main.cpp) (XIAO ESP32-C3, Arduino/P
 
 - **Relays**: grip on D1 (GPIO3), release on D3 (GPIO5), both active LOW. **BMP180** on I2C D4/D5.
 - **States**: `IDLE` → `GRIP` → `GRIPPING` (vacuum relay held on) → `RELEASE` → `RELEASING` (1.5 s release pulse) → `IDLE`.
-- **Hold detection**: the pressure just before `GRIP` is the baseline. The object counts as held once the pressure has dropped **≥ 180 hPa** below it, and stops counting below 120 hPa (hysteresis). The controller sends unsolicited lines: `GRIP OK`, `GRIP FAIL` (nothing held after 8 s; the vacuum stays on), `GRIP LOST`, `GRIP UNKNOWN` (no sensor).
+- **Hold detection**: the pressure just before `GRIP` is the baseline. The object counts as held once the pressure has dropped **≥ 180 hPa** below it, and stops counting below 120 hPa (hysteresis). The controller sends unsolicited lines: `GRIP OK`, `GRIP FAIL` (nothing held after 8 s; the vacuum stays on), `GRIP LOST`, `GRIP UNKNOWN` (no sensor, or no valid reading for 500 ms while gripping). Readings from a loose I2C wire are rejected (chip ID + 300–1100 hPa range), so they cannot fake `GRIP OK` / `GRIP LOST`.
 - **Commands** (ASCII + `\n`, 115200 8N1): `STATUS`, `GRIP`, `RELEASE`, `HOLD`, `PRESSURE`. Errors: `ERR BUSY`, `ERR UNKNOWN_COMMAND`, `ERR LINE_TOO_LONG`, `ERR NO_SENSOR`.
 
 Host side: [ur5e_experiments/suction.py](ur5e_experiments/suction.py).

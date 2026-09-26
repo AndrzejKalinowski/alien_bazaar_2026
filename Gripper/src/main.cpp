@@ -16,6 +16,21 @@ constexpr size_t COMMAND_BUFFER_SIZE = 32;
 // BMP180 (I2C 0x77) on the Waveshare 10 DOF IMU Sensor, I2C on D4 (SDA) /
 // D5 (SCL). Each reading blocks for about 13 ms (temperature + pressure).
 constexpr unsigned long PRESSURE_SAMPLE_MS = 50;
+// readPressure() cannot report I2C errors (the library ignores the bus
+// results), so a loose wire gives garbage. A reading only counts if the chip
+// still answers with its ID afterwards and the value is inside the BMP180's
+// 300-1100 hPa range; otherwise the pressure is NAN.
+constexpr uint8_t BMP180_ADDRESS = 0x77;
+constexpr uint8_t BMP180_CHIP_ID_REGISTER = 0xD0;
+constexpr uint8_t BMP180_CHIP_ID = 0x55;
+constexpr float MIN_VALID_HPA = 300.0f;
+constexpr float MAX_VALID_HPA = 1100.0f;
+// Invalid readings for this long while gripping -> GRIP UNKNOWN. Shorter
+// glitches (1-9 samples) are ignored: the held state is kept meanwhile.
+constexpr unsigned long SENSOR_LOST_MS = 500;
+// A sensor missing at startup is probed again this often, so fixing the
+// wire brings it back without a reset.
+constexpr unsigned long SENSOR_RETRY_MS = 2000;
 // Pressure drop below the pre-grip baseline that marks a sealed (held)
 // object, with hysteresis. Measured over 10 grip cycles: open cup settles at
 // 71-99 hPa, a held object at 213-395 hPa. HOLD turns on at the ON threshold
@@ -40,29 +55,70 @@ float pressureHpa = NAN;
 float baselineHpa = NAN;
 bool holding = false;
 unsigned long lastPressureSampleAt = 0;
+unsigned long lastValidSampleAt = 0;
+unsigned long lastSensorRetryAt = 0;
+bool sensorLostReported = false;
 unsigned long gripStartedAt = 0;
 bool gripResultSent = false;
 
-bool beginPressureSensor() {
-  Wire.begin();
-  return bmp.begin(BMP085_STANDARD);
+bool chipAnswers() {
+  Wire.beginTransmission(BMP180_ADDRESS);
+  Wire.write(BMP180_CHIP_ID_REGISTER);
+  if (Wire.endTransmission() != 0) {
+    return false;
+  }
+  if (Wire.requestFrom(BMP180_ADDRESS, static_cast<uint8_t>(1)) != 1) {
+    return false;
+  }
+  return Wire.read() == BMP180_CHIP_ID;
 }
 
 void samplePressure() {
-  if (!sensorReady) {
-    return;
-  }
-  pressureHpa = bmp.readPressure() / 100.0f;
   lastPressureSampleAt = millis();
+  if (!sensorReady) {
+    pressureHpa = NAN;
+    if (lastPressureSampleAt - lastSensorRetryAt >= SENSOR_RETRY_MS) {
+      lastSensorRetryAt = lastPressureSampleAt;
+      sensorReady = bmp.begin(BMP085_STANDARD);
+    }
+    if (!sensorReady) {
+      return;
+    }
+  }
+  float hpa = bmp.readPressure() / 100.0f;
+  bool valid = chipAnswers() && hpa >= MIN_VALID_HPA && hpa <= MAX_VALID_HPA;
+  pressureHpa = valid ? hpa : NAN;
+  if (valid) {
+    lastValidSampleAt = lastPressureSampleAt;
+  }
 }
 
 float vacuumHpa() { return baselineHpa - pressureHpa; }
+
+// A failed reading while gripping keeps the held state (no false GRIP LOST);
+// if the sensor stays silent for SENSOR_LOST_MS, report GRIP UNKNOWN once.
+void updateSensorLost() {
+  if (sensorLostReported || millis() - lastValidSampleAt < SENSOR_LOST_MS) {
+    return;
+  }
+  sensorLostReported = true;
+  gripResultSent = true;  // no GRIP FAIL either, the result is unknown now
+  Serial.println("GRIP UNKNOWN");
+}
 
 // Reports GRIP OK when an object becomes held and GRIP LOST when it is lost
 // while the grip relay is still on.
 void updateHolding() {
   bool wasHolding = holding;
-  if (state != State::GRIPPING || isnan(baselineHpa) || isnan(pressureHpa)) {
+  if (state == State::GRIPPING && !isnan(baselineHpa)) {
+    if (isnan(pressureHpa)) {
+      updateSensorLost();
+      return;
+    }
+    sensorLostReported = false;  // report the next outage again
+  }
+
+  if (state != State::GRIPPING || isnan(baselineHpa)) {
     holding = false;
   } else if (vacuumHpa() >= HOLD_ON_THRESHOLD_HPA) {
     holding = true;
@@ -113,6 +169,7 @@ void startGrip() {
   state = State::GRIPPING;
   gripStartedAt = millis();
   gripResultSent = false;
+  sensorLostReported = false;
   Serial.println("DONE GRIP");
   if (!sensorReady || isnan(baselineHpa)) {
     gripResultSent = true;
@@ -217,7 +274,9 @@ void setup() {
   pinMode(RELEASE_RELAY_PIN, OUTPUT);
   setIdle();
   Serial.begin(115200);
-  sensorReady = beginPressureSensor();
+  Wire.begin();
+  sensorReady = bmp.begin(BMP085_STANDARD);
+  lastSensorRetryAt = millis();
   samplePressure();
 }
 
