@@ -1,4 +1,6 @@
 .pio/build/seeed_xiao_esp32c3/src/main.cpp.o: src/main.cpp \
+ .pio/libdeps/seeed_xiao_esp32c3/Adafruit\ BMP085\ Library/Adafruit_BMP085.h \
+ .pio/libdeps/seeed_xiao_esp32c3/Adafruit\ BusIO/Adafruit_I2CDevice.h \
  C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp_arduino_version.h \
  C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32c3/include/freertos/include/freertos/FreeRTOS.h \
@@ -160,4 +162,6 @@
  C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32c3/include/spi_flash/include/esp_spi_flash_counters.h \
  C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32c3/include/esp_hw_support/include/soc/esp32/spiram.h \
  C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
- C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h
+ C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
+ C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src/Wire.h \
+ C:/Users/Adam/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal.h
