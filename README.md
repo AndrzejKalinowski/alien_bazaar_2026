@@ -208,6 +208,7 @@ Run everything from `ur5e_experiments/` with the venv active.
 ### Step 1: Lens calibration (each camera, once per camera + resolution)
 
 ```powershell
+python calibrate_camera.py --list-cameras # which index is which camera (check before calibrating and before a demo)
 python calibrate_camera.py --print        # optional: writes charuco_board.png (7x5, 25 mm squares) – print at 100 %
 python calibrate_camera.py                # wrist camera (index 0) -> camera_calibration.npz
 python calibrate_camera.py --camera 2 --output overhead_camera_calibration.npz   # overhead camera
@@ -475,7 +476,7 @@ To find COM ports: Device Manager → Ports, or `python -m serial.tools.list_por
 | Robot protective-stops with **C271A1 "Runtime is too much behind"** | `speedL` called with `time=0`. Always pass `SPEED_CMD_TIME` |
 | `RTDE control script is not running` | A protective stop, an e-stop, local mode or the watchdog killed the script. The watchdog-enabled scripts re-upload it by themselves (after the stop is cleared on the pendant); otherwise restart the script. Also make sure no PolyScope program is running |
 | "Robot control script stopped (main loop stalled?)" | The watchdog fired: the loop sent nothing for 0.2 s. Look for something blocking the loop (a slow camera, dragging the window) |
-| Wrong camera opens / "calibrated at … but camera gives …" | Windows renumbered the USB cameras. Change `CAMERA_INDEX` / `OVERHEAD_CAMERA_INDEX`. Check that the image is the one you expect before trusting the calibration |
+| Wrong camera opens / "calibrated at … but camera gives …" | Windows renumbered the USB cameras. Run `python calibrate_camera.py --list-cameras`: it shows every index with the role the scripts give it. Change `CAMERA_INDEX` / `OVERHEAD_CAMERA_INDEX` to match. Both cameras are 1280×720, so a swap is **not** detected otherwise: each camera silently uses the other's calibration |
 | Glass positions consistently off by a few mm to cm | Wrong `RIM_HEIGHT` (`GLASS_HEIGHT` in the pick-and-place demo) for the kind of glass, the camera was bumped (redo step 3), or the TCP changed on the pendant |
 | Tag "base" position drifts while jogging (wrist camera) | Bad `hand_eye.npz` or intrinsics. Redo steps 1–2, and check `TAG_SIZE` |
 | Circles on everything | Raise `roundness %` / `edge`, lower `max saturation`, shrink the detection area, use a dark matte mat |

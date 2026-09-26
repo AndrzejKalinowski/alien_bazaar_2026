@@ -65,7 +65,7 @@ In `find_glasses.py` it is the height of the circle seen for *upright* glasses. 
 [pick_place_glasses.py:51](ur5e_experiments/pick_place_glasses.py#L51) `PLACE_TAG_ID = None`. The overhead calibration uses the same tag family, so a calibration tag left on the table can become the place target.
 *Fix:* set an explicit id for the demo, and draw the id next to the "place" marker.
 
-**10. Camera indices are fragile and documented inconsistently**
+**10. Camera indices are fragile and documented inconsistently** *Fixed on branch `fix/audit`: docstring says `--camera 2`, new `calibrate_camera.py --list-cameras` shows every index labelled with its role. Picking cameras by device name is still open.*
 `OVERHEAD_CAMERA_INDEX = 2` in [find_glasses.py:114](ur5e_experiments/find_glasses.py#L114), but [calibrate_camera.py:37](ur5e_experiments/calibrate_camera.py#L37) says `--camera 1` for the overhead camera. On Windows the DirectShow indices change when cameras are re-plugged. If the two cameras swap, each gets the other's calibration, and nothing complains, because both are 1280×720.
 *Fix:* fix the docstring. Before the demo, verify which camera is which (e.g. a `--list-cameras` helper that shows every index). Longer term, pick cameras by device name.
 
