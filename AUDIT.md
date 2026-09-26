@@ -32,12 +32,14 @@ For **tomorrow's demo**, do items 1–4 and the "demo hardening" list at the end
 Today the only backstops are the force sensor (a protective stop on hard contact) and the e-stop.
 *Fix (small):* call `rtde_c.setWatchdog(10.0)` after connecting and `rtde_c.kickWatchdog()` once per loop iteration. ur_rtde 1.6.5 has both. The robot then stops by itself if kicks stop arriving for about 100 ms. Also give `read_frame()` a timeout (e.g. 0.5 s) that raises, so the `finally` block runs `speedStop`.
 
-**3. Pick fails when the vacuum is already on (`GRIP` → `ERR BUSY` is ignored)**
-The firmware answers `GRIP` with `ERR BUSY` while it is `GRIPPING` ([Gripper/src/main.cpp:171](Gripper/src/main.cpp#L171)). `Suction.grip()` ([suction.py:38](ur5e_experiments/suction.py#L38)) does not check this. It clears `_grip_result` to `None`, and because no new `GRIP …` line arrives, the pick tasks wait `GRIP_CONFIRM_TIMEOUT` (6 s) and then **release and abort**. This happens after:
-- pressing **g / B** manually, then **p / Y**;
-- a `"glass lost while carrying (vacuum still on)"` abort in `pick_place_glasses.py`, then retrying with **p**.
+**3. Pick after a manual grip: narrower than first reported** *Corrected and fixed on branch `fix/audit`.*
+The firmware answers `GRIP` with `ERR BUSY` while it is `GRIPPING` ([Gripper/src/main.cpp:171](Gripper/src/main.cpp#L171)) and changes nothing: the vacuum stays on with the first `GRIP`'s atmospheric baseline. The original claim here ("no new `GRIP …` line arrives") was wrong for the common cases: `updateHolding()` sends `GRIP OK` / `GRIP LOST` on every change of the held state, independent of `gripResultSent`. So **g** then **p**, or a retry after "glass lost while carrying", still gets `GRIP OK` when the cup seals on the new glass.
 
-*Fix:* in `grip()`, if the controller is `GRIPPING`, send `RELEASE` and `wait_for_release()` first, or have the pick tasks call `suction.release(wait=True)` before approaching. Do not simply re-baseline in firmware: the baseline must be taken at atmospheric pressure.
+The real bug was that `Suction.grip()` always cleared `_grip_result`, even when the controller rejected the `GRIP`. That broke two cases, both ending in a 6 s timeout, release and abort:
+- no pressure sensor: `GRIP UNKNOWN` is sent only once, at the first `GRIP`;
+- something already held when **p** is pressed: `holding` does not change, so no new `GRIP OK`.
+
+*Fix (done):* `grip()` no longer clears the result. It is cleared on `DONE GRIP` (the controller really started a new session with a fresh baseline) and on `release()`. The firmware is unchanged.
 
 **4. Jogging has no ceiling or floor guard outside `follow_april_tag.py`**
 `follow_april_tag.py` caps upward jog speed near `MAX_TCP_Z`, but `Jogger` ([gamepad_jog.py:98](ur5e_experiments/gamepad_jog.py#L98)), used by `find_glasses.py`, `pick_place_glasses.py` and `gamepad_robot_teleop.py`, sends raw stick speeds with no Z limits. `HomeTask` in [pick_place_glasses.py:126](ur5e_experiments/pick_place_glasses.py#L126) also skips the "home above ceiling" check that `follow_april_tag.HomeTask` has.
@@ -130,7 +132,7 @@ A `pytest` file running in under a second would catch refactor slips like #1.
 
 ### Before the demo (today / tomorrow morning)
 
-1. **Fix #1–#4.** Each is a few lines. #2 (watchdog) and #3 (`ERR BUSY`) are the ones most likely to hurt you live.
+1. **Fix #1–#4.** Each is a few lines. #2 (watchdog) is the one most likely to hurt you live (#3 turned out to be narrower, see above).
 2. **Freeze and back up the calibration.** Commit the `.npz` / `.json` files, tag the commit (`git tag demo-baseline`), and copy them to a USB stick. After that, **do not move the overhead camera or change the TCP**.
 3. **Pre-flight script** (`preflight.py`, about 50 lines). It prints a pass/fail list:
    - robot reachable and not protective-stopped;

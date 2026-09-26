@@ -478,6 +478,6 @@ To find COM ports: Device Manager → Ports, or `python -m serial.tools.list_por
 | Glass positions consistently off by a few mm to cm | Wrong `RIM_HEIGHT` for the kind of glass, the camera was bumped (redo step 3), or the TCP changed on the pendant |
 | Tag "base" position drifts while jogging (wrist camera) | Bad `hand_eye.npz` or intrinsics. Redo steps 1–2, and check `TAG_SIZE` |
 | Circles on everything | Raise `roundness %` / `edge`, lower `max saturation`, shrink the detection area, use a dark matte mat |
-| Grip always times out | Check `python suction.py` and the COM port. `GRIP FAIL` means the seal never reached 180 hPa: the cup or glass surface is dirty or wet, or the approach is off-centre. If the vacuum was already on, `GRIP` is answered with `ERR BUSY` (see AUDIT.md) |
+| Grip always times out | Check `python suction.py` and the COM port. `GRIP FAIL` means the seal never reached 180 hPa: the cup or glass surface is dirty or wet, or the approach is off-centre. A `GRIP` while the vacuum is already on is answered with `ERR BUSY` and is harmless: the grip session and its last result stay as they are |
 | "Suction gripper not available, running without it" | `COM9` is missing, or the port is busy (a serial monitor is still open?) |
 | Gamepad does nothing | `No gamepad found, keyboard only` is printed at start. Plug it in before starting the script |
