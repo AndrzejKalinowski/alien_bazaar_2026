@@ -67,7 +67,7 @@ import rtde_control
 import rtde_receive
 import math
 
-from gamepad_jog import SPEED_ACCEL, GamepadControl
+from gamepad_jog import SPEED_ACCEL, GamepadControl, limit_z_speed
 from robot_watchdog import RobotWatchdog
 from serial import SerialException
 from suction import Suction, key_command
@@ -128,7 +128,6 @@ MAX_OVERSHOOT = 0.02         # m, push at most this far past the estimated tag s
 MIN_TCP_Z = -0.05            # m in base frame, never go lower than this (table guard)
 MAX_TCP_Z = 0.60             # m in base frame, never go higher than this (ceiling guard)
 CEILING_MARGIN = 0.02        # m, stop everything if the TCP ends up this far above MAX_TCP_Z
-CEILING_JOG_GAIN = 2.0       # 1/s, jog Z speed is capped to gain * distance left to the ceiling
 
 GRIP_DWELL = 0.5         # s, let the vacuum build up before lifting
 # s after contact to wait for the controller's "GRIP OK" before giving up.
@@ -678,8 +677,8 @@ def main():
 
                 jog = gamepad.jog_speed()
                 if jog is not None:
-                    # Slow down upwards motion near the ceiling, only allow down above it
-                    jog[2] = min(jog[2], max(0.0, CEILING_JOG_GAIN * (MAX_TCP_Z - tcp_pose[2])))
+                    # Slow down near the ceiling / table guard, only allow the way back beyond them
+                    limit_z_speed(jog, tcp_pose[2], MIN_TCP_Z, MAX_TCP_Z)
                     if task is not None:
                         task.abort()
                         task = None

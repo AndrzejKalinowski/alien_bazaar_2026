@@ -112,7 +112,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from follow_april_tag import IP, TAG_DICTIONARY, pose_to_matrix
+from follow_april_tag import IP, MAX_TCP_Z, MIN_TCP_Z, TAG_DICTIONARY, pose_to_matrix
 from gamepad_jog import GamepadControl, Jogger
 from robot_watchdog import RobotWatchdog
 
@@ -160,7 +160,6 @@ MIN_POINTS = 6
 HOVER_CHECK = 0.05           # m, tip height above the rim for the check move
 CHECK_SPEED = 0.1            # m/s
 CHECK_ACCEL = 0.3
-MIN_TCP_Z = -0.05            # m, never go lower than this
 
 WINDOW = "find glasses"
 MAP_SIZE = 300               # px, top-down map in the corner of the video
@@ -830,7 +829,7 @@ def calibrate(args):
     rtde_r = rtde_receive.RTDEReceiveInterface(IP)
     rtde_c = rtde_control.RTDEControlInterface(IP)
     gamepad = GamepadControl(CALIBRATE_GAMEPAD_KEYS)
-    jogger = Jogger(rtde_c, gamepad)
+    jogger = Jogger(rtde_c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
     cap, width, height = open_camera()
     undistort = Undistorter(width, height)
     detector = make_tag_detector()
@@ -866,7 +865,7 @@ def calibrate(args):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             cv2.imshow(WINDOW, image)
 
-            jogger.update(enabled=not freedrive)
+            jogger.update(rtde_r.getActualTCPPose(), enabled=not freedrive)
             keys = read_keys(gamepad)
             if "q" in keys or "\x1b" in keys or window_closed():
                 break
@@ -945,7 +944,7 @@ def run(args):
         rtde_r = rtde_receive.RTDEReceiveInterface(IP)
         rtde_c = rtde_control.RTDEControlInterface(IP)
         gamepad = GamepadControl(RUN_GAMEPAD_KEYS)
-        jogger = Jogger(rtde_c, gamepad)
+        jogger = Jogger(rtde_c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
 
     editor = AreaEditor(finder)
     setup_window(editor)
@@ -962,12 +961,13 @@ def run(args):
                 jogger.stop()
                 status = "Robot was stopped (loop stall / protective stop)"
             glasses = finder.detect(image)
-            tip_xy = rtde_r.getActualTCPPose()[:2] if rtde_r else None
+            tcp = rtde_r.getActualTCPPose() if rtde_r else None
+            tip_xy = tcp[:2] if tcp else None
             draw_overlay(image, finder, editor, glasses, status, tip_xy)
             cv2.imshow(WINDOW, image)
 
             if jogger:
-                jogger.update()
+                jogger.update(tcp)
             keys = read_keys(gamepad)
             if "q" in keys or "\x1b" in keys:
                 break
@@ -996,7 +996,7 @@ def run(args):
                         c = np.array([width / 2, height / 2])
                         g = min(measured, key=lambda g: np.linalg.norm(np.array(g.pixel[:2]) - c))
                         tcp = rtde_r.getActualTCPPose()
-                        target = [g.x, g.y, max(g.z + HOVER_CHECK, MIN_TCP_Z)] + list(tcp[3:])
+                        target = [g.x, g.y, min(max(g.z + HOVER_CHECK, MIN_TCP_Z), MAX_TCP_Z)] + list(tcp[3:])
                         print(f"Moving tip above glass at {g.x * 1000:.0f}, {g.y * 1000:.0f} mm")
                         rtde_c.moveL(target, CHECK_SPEED, CHECK_ACCEL, True)
     finally:

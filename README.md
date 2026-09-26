@@ -304,7 +304,7 @@ Press **p / Y** to pick the tag closest to the image centre, or `TARGET_TAG_ID`.
 - **dwell**: wait for `GRIP OK`.
 - **lift**: back off 15 cm along the normal.
 
-Tags lying flat, tilted or on vertical faces all work, up to `MAX_TILT_DEG = 100°` from vertical. Normals within 8° of vertical snap to vertical. If the camera stops delivering frames for 0.5 s, the robot stops. Jogging up is slowed near the `MAX_TCP_Z` ceiling.
+Tags lying flat, tilted or on vertical faces all work, up to `MAX_TILT_DEG = 100°` from vertical. Normals within 8° of vertical snap to vertical. If the camera stops delivering frames for 0.5 s, the robot stops. Jogging is slowed near the `MAX_TCP_Z` ceiling and the `MIN_TCP_Z` table guard (in every script, see §13).
 
 **Sanity check**: with a tag lying still, jog the robot around. The "base" coordinates shown on the tag should barely change. If they drift, redo the hand-eye calibration.
 
@@ -432,8 +432,9 @@ These are software guards, **not** a replacement for the UR safety configuration
 
 | Guard | Value | Where | Effect |
 |---|---|---|---|
-| `MIN_TCP_Z` | −0.05 m | `follow_april_tag.py`, `find_glasses.py` | Targets are clamped above this height (table guard) |
-| `MAX_TCP_Z` | 0.60 m | `follow_april_tag.py` | Targets are clamped below it. Jogging up slows near it. In `follow_april_tag` a task more than 2 cm above it is aborted, and home is refused if it is above the ceiling |
+| `MIN_TCP_Z` | −0.05 m | `follow_april_tag.py` (imported by the others) | Targets are clamped above this height (table guard). Jogging down slows near it and stops at it |
+| `MAX_TCP_Z` | 0.60 m | `follow_april_tag.py` (imported by the others) | Targets are clamped below it. Jogging up slows near it and stops at it. A task more than 2 cm above it (`CEILING_MARGIN`) is aborted, and home is refused if it is above the ceiling (`follow_april_tag`, `pick_place_glasses`, teleop) |
+| Jog Z limit | `Z_LIMIT_GAIN` = 2 /s | `gamepad_jog.py` (`Jogger`, `limit_z_speed`), used by every script | Z jog speed ≤ gain × distance to the limit: slowdown starts 4 cm before it. Beyond a limit only the way back is allowed |
 | `MAX_OVERSHOOT` | 20 mm / 15 mm | tag picker / glass pick-place | The farthest a force-guarded push may go past the expected surface |
 | `CONTACT_FORCE` / `PLACE_FORCE` | 12 N / 10 N / 8 N | tag pick / glass pick / glass place | Descent stops above this force |
 | `CAMERA_TIMEOUT` / `FRAME_TIMEOUT` | 0.5 s | `follow_april_tag.py` / `find_glasses.py` | No new frame → `speedStop` / error (the `finally` stops the robot) |

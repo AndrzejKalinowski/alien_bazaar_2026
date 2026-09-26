@@ -52,7 +52,7 @@ import rtde_control
 import rtde_receive
 
 import find_glasses as fg
-from follow_april_tag import HOME_Q, IP, MAX_TCP_Z, MIN_TCP_Z, connect_suction
+from follow_april_tag import CEILING_MARGIN, HOME_Q, IP, MAX_TCP_Z, MIN_TCP_Z, connect_suction
 from gamepad_jog import GamepadControl, Jogger
 from robot_watchdog import RobotWatchdog
 from serial import SerialException
@@ -147,6 +147,9 @@ class Task:
 
 class HomeTask(Task):
     def run(self):
+        home_z = self.c.getForwardKinematics(HOME_Q)[2]
+        if home_z > MAX_TCP_Z:
+            raise TaskFailed(f"home is above the ceiling ({home_z:.3f} > {MAX_TCP_Z:.3f} m), not moving")
         self.c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL, True)
         yield from self.wait_move("going home...")
         self.status = "home"
@@ -287,7 +290,7 @@ def main():
     r = rtde_receive.RTDEReceiveInterface(IP)
     c = rtde_control.RTDEControlInterface(IP)
     gamepad = GamepadControl(GAMEPAD_KEYS)
-    jogger = Jogger(c, gamepad)
+    jogger = Jogger(c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
     print("Connected to robot. TCP pose:", r.getActualTCPPose())
 
     task = None
@@ -329,7 +332,12 @@ def main():
                 status = "manual override, task aborted"
                 print(status)
             if task is None:
-                jogger.update()
+                jogger.update(tcp)
+            # Last line of defence for tasks (e.g. the moveJ home arcing upwards)
+            elif tcp[2] > MAX_TCP_Z + CEILING_MARGIN:
+                task.abort()
+                task = None
+                status = warn(f"above the ceiling ({tcp[2]:.3f} m), task stopped - jog down")
 
             keys = fg.read_keys(gamepad)
             if "q" in keys or "\x1b" in keys:

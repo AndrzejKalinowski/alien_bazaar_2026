@@ -41,7 +41,7 @@ The real bug was that `Suction.grip()` always cleared `_grip_result`, even when 
 
 *Fix (done):* `grip()` no longer clears the result. It is cleared on `DONE GRIP` (the controller really started a new session with a fresh baseline) and on `release()`. The firmware is unchanged.
 
-**4. Jogging has no ceiling or floor guard outside `follow_april_tag.py`**
+**4. Jogging has no ceiling or floor guard outside `follow_april_tag.py`** *Fixed on branch `fix/audit`: `Jogger(c, gamepad, min_z, max_z).update(tcp_pose)` caps Z with `limit_z_speed()` (also used by `follow_april_tag`, which gains the floor guard). `pick_place_glasses` and teleop refuse a home above the ceiling, and `pick_place_glasses` aborts a task more than `CEILING_MARGIN` above it. `find_glasses` imports `MIN_TCP_Z` instead of its own copy.*
 `follow_april_tag.py` caps upward jog speed near `MAX_TCP_Z`, but `Jogger` ([gamepad_jog.py:98](ur5e_experiments/gamepad_jog.py#L98)), used by `find_glasses.py`, `pick_place_glasses.py` and `gamepad_robot_teleop.py`, sends raw stick speeds with no Z limits. `HomeTask` in [pick_place_glasses.py:126](ur5e_experiments/pick_place_glasses.py#L126) also skips the "home above ceiling" check that `follow_april_tag.HomeTask` has.
 *Fix:* move the ceiling cap (and a `MIN_TCP_Z` floor cap) into `Jogger.update()` by passing it the current TCP pose, so every script gets the same limits.
 

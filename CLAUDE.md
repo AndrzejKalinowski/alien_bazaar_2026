@@ -20,7 +20,7 @@ Hackathon code (Alien Bazaar 2026, team Rabyte) for a **UR5e robot arm with a cu
   - `pick_place_glasses.py`: main demo (generator-based `Task`s stepped once per video frame).
   - `find_glasses.py`: `GlassFinder` (Hough circles + HSV rim filter + back-projection to base frame), `AreaEditor`, overhead-camera calibration (`--calibrate`). It is both a tool and a library.
   - `follow_april_tag.py`: wrist-camera tag picker **and the de facto shared module**: `IP`, `HOME_Q`, `MIN/MAX_TCP_Z`, `TAG_DICTIONARY`, `TAG_SIZE`, `pose_to_matrix`, `Camera`, `TagDetector`, `connect_suction`. Importing it has side effects (it loads `hand_eye.npz` and needs `ur_rtde`).
-  - `gamepad_jog.py`: `GamepadControl` (button → key edges, stick → speed vector), `Jogger`.
+  - `gamepad_jog.py`: `GamepadControl` (button → key edges, stick → speed vector), `Jogger` (needs the Z limits and the current TCP pose, so every script jogs with the same ceiling / floor guard), `limit_z_speed`.
   - `robot_watchdog.py`: `RobotWatchdog`, the RTDE watchdog that stops the robot when a main loop stalls.
   - `suction.py`: host driver for the gripper serial protocol.
   - `hand_eye_calibration.py`, `calibrate_camera.py`: calibration tools that write the `.npz` files.
