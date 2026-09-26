@@ -6,9 +6,15 @@ How it works:
   2. Each tag's pose is estimated with solvePnP and transformed into the robot
      base frame:  T_base_tag = T_base_tcp @ T_tcp_cam @ T_cam_tag
   3. On "pick", the robot servos (speedL, recomputed every video frame) so the
-     camera is above the tag, then so the suction cup is just above the tag,
-     turns the vacuum on and slowly descends until it feels contact through the
-     UR5e's force/torque sensor (or reaches the max depth), then lifts.
+     tool points into the tag along its surface normal (works for tags lying
+     flat, tilted or on vertical faces) with the camera in front of the tag,
+     then so the suction cup is just in front of the tag, turns the vacuum on
+     and slowly pushes along the normal until it feels contact through the
+     UR5e's force/torque sensor (or reaches the max depth), then backs off
+     along the normal once the suction controller reports GRIP OK (or releases
+     and gives up after GRIP_CONFIRM_TIMEOUT).
+     The tool's rotation around the approach axis is kept as close as possible
+     to where it started, so the wrist turns as little as possible.
      The tag is re-detected on every frame the whole time, so the target keeps
      updating (and follows the tag if it moves). When the tag drops out of view
      (e.g. the camera is too close), the last estimate is used.
@@ -21,8 +27,9 @@ Keys (in the video window) / gamepad:
   h  / Start       go home
   q/Esc            quit
 
-Manual jogging with the gamepad works like gamepad_robot_teleop.py:
-  left stick = move in X/Y, triggers = move in Z, hold RB = rotate instead.
+Manual jogging with the gamepad (see gamepad_jog.py):
+  left stick = move in X/Y, triggers = move in Z, hold RB = rotate instead,
+  hold LB = fine.
 Touching the sticks/triggers during a pick aborts it (manual override).
 
 Setup before first use:
@@ -51,12 +58,10 @@ import cv2
 import numpy as np
 import rtde_control
 import rtde_receive
-from inputs import devices
-from pygamepad.gamepads import Gamepad
 import math
 
-from gamepad_robot_teleop import (MAX_LINEAR_SPEED, MAX_ROTATION_SPEED, MAX_Z_SPEED,
-                                  SPEED_ACCEL, apply_deadzone)
+from gamepad_jog import SPEED_ACCEL, GamepadControl
+from serial import SerialException
 from suction import Suction
 
 IP = "192.168.1.20"
@@ -70,18 +75,26 @@ CALIBRATION_FILE = os.path.join(os.path.dirname(__file__), "camera_calibration.n
 CAMERA_TIMEOUT = 0.5     # s without a new frame -> stop the robot
 
 # Camera pose relative to the TCP (suction cup tip), in the tool frame.
-# Assumes the camera looks along tool +Z (same direction as the suction cup).
-CAMERA_OFFSET = [0.05, 0.0, 0.05]   # meters, [x, y, z] in tool frame
-CAMERA_YAW_DEG = 90                # rotation of camera around tool Z
+# hand_eye_calibration.py measures it automatically and writes HAND_EYE_FILE,
+# which is used instead of the manual values below when it exists.
+HAND_EYE_FILE = os.path.join(os.path.dirname(__file__), "hand_eye.npz")
+# Manual fallback. Assumes the camera looks along tool +Z (same direction as the suction cup).
+CAMERA_OFFSET = [0.05, 0.0, 0.1]   # meters, [x, y, z] in tool frame
+CAMERA_YAW_DEG = 0                # rotation of camera around tool Z
 
 # --- tags -------------------------------------------------------------------
 TAG_DICTIONARY = cv2.aruco.DICT_APRILTAG_36h11
-TAG_SIZE = 0.04          # meters, edge of the black square
+TAG_SIZE = 0.08          # meters, edge of the black square
 TARGET_TAG_ID = None     # None = pick the tag closest to the image center
 AXES_LENGTH = 0.75       # drawn axes length, as a fraction of TAG_SIZE
 
 TRACK_SMOOTHING = 0.3    # 0..1, weight of each new measurement in the running estimate
 TRACK_MAX_JUMP = 0.05    # m, ignore measurements this far from the estimate (misdetections)
+TRACK_MAX_TURN_DEG = 25  # deg, ignore measurements whose normal is this far off the estimate
+# Tag normals within this angle of vertical are treated as exactly vertical, so
+# flat tags are picked straight down despite pose-estimation noise. 0 = off.
+NORMAL_SNAP_DEG = 8
+MAX_TILT_DEG = 100       # deg from vertical, refuse to pick tags tilted further (facing down)
 
 # --- motion -----------------------------------------------------------------
 HOME_Q = [0, -1.57, 1.57, -1.57, -1.57, 0]   # tool pointing down
@@ -92,18 +105,27 @@ SERVO_GAIN = 0.8     # 1/s, speed = gain * distance to target
 SERVO_MAX_SPEED = 0.15   # m/s
 SERVO_ACCEL = 0.5        # m/s^2
 SERVO_TOLERANCE = 0.005  # m, "arrived" when closer than this
+SERVO_ROT_GAIN = 1.0         # 1/s, rotation speed = gain * angle to target
+SERVO_MAX_ROT_SPEED = 0.5    # rad/s
+SERVO_ROT_TOLERANCE_DEG = 2  # deg, "arrived" when the orientation is closer than this
 
-HOVER_HEIGHT = 0.25      # camera height above the tag for the first approach
-APPROACH_HEIGHT = 0.05   # suction cup height above the tag before descending
-LIFT_HEIGHT = 0.15       # how far to lift after gripping
+HOVER_HEIGHT = 0.25      # camera distance from the tag (along its normal) for the first approach
+APPROACH_HEIGHT = 0.05   # suction cup distance from the tag before pushing in
+LIFT_HEIGHT = 0.15       # how far to back off along the tag normal after gripping
 
 DESCEND_SPEED = 0.02         # m/s, slow final approach
 DESCEND_ACCEL = 0.2
 CONTACT_FORCE = 12.0         # N, stop descending above this
-MAX_OVERSHOOT = 0.02         # m, descend at most this far below the estimated tag
+MAX_OVERSHOOT = 0.02         # m, push at most this far past the estimated tag surface
 MIN_TCP_Z = -0.05            # m in base frame, never go lower than this (table guard)
+MAX_TCP_Z = 0.60             # m in base frame, never go higher than this (ceiling guard)
+CEILING_MARGIN = 0.02        # m, stop everything if the TCP ends up this far above MAX_TCP_Z
+CEILING_JOG_GAIN = 2.0       # 1/s, jog Z speed is capped to gain * distance left to the ceiling
 
 GRIP_DWELL = 0.5         # s, let the vacuum build up before lifting
+# s after contact to wait for the controller's "GRIP OK" before giving up.
+# Objects sealed 0.9-5.4 s after GRIP in the controller's tests.
+GRIP_CONFIRM_TIMEOUT = 6.0
 
 # Always pass a time to speedL: with time=0 the speed loop in the ur_rtde control
 # script spins without pausing and the robot protective-stops with
@@ -126,6 +148,11 @@ def pose_to_matrix(pose):
 
 
 def tcp_to_camera_matrix():
+    if os.path.exists(HAND_EYE_FILE):
+        print(f"Loaded camera mounting from {HAND_EYE_FILE} "
+              "(CAMERA_OFFSET / CAMERA_YAW_DEG ignored, run hand_eye_calibration.py to redo)")
+        return np.load(HAND_EYE_FILE)["T_tcp_cam"]
+
     yaw = np.radians(CAMERA_YAW_DEG)
     T = np.eye(4)
     T[:3, :3] = [[np.cos(yaw), -np.sin(yaw), 0],
@@ -133,6 +160,43 @@ def tcp_to_camera_matrix():
                  [0, 0, 1]]
     T[:3, 3] = CAMERA_OFFSET
     return T
+
+
+def rotvec_between(a, b):
+    """Axis-angle of the smallest rotation turning unit vector a into unit vector b."""
+    axis = np.cross(a, b)
+    s = np.linalg.norm(axis)
+    c = np.dot(a, b)
+    if s < 1e-9:
+        if c > 0:
+            return np.zeros(3)
+        # Opposite vectors: turn 180 deg around any axis perpendicular to a
+        axis = np.cross(a, [1, 0, 0])
+        if np.linalg.norm(axis) < 1e-6:
+            axis = np.cross(a, [0, 1, 0])
+        return axis / np.linalg.norm(axis) * np.pi
+    return axis / s * np.arctan2(s, c)
+
+
+def rotation_between(a, b):
+    return cv2.Rodrigues(rotvec_between(a, b))[0]
+
+
+def rotation_error(R_target, R_current):
+    """Axis-angle (base frame) that turns R_current into R_target."""
+    return cv2.Rodrigues(R_target @ R_current.T)[0].flatten()
+
+
+def angle_between(a, b):
+    return np.arctan2(np.linalg.norm(np.cross(a, b)), np.dot(a, b))
+
+
+def snap_normal(normal):
+    """Treat nearly vertical normals as exactly vertical (see NORMAL_SNAP_DEG)."""
+    up = np.array([0.0, 0.0, 1.0])
+    if angle_between(normal, up) < np.radians(NORMAL_SNAP_DEG):
+        return up
+    return normal
 
 
 T_TCP_CAM = tcp_to_camera_matrix()
@@ -253,8 +317,17 @@ class TagDetector:
         return min(tags, key=lambda t: np.linalg.norm(t[1].mean(axis=0) - center))
 
 
+def tag_pose_in_base(tcp_pose, T_cam_tag):
+    return pose_to_matrix(tcp_pose) @ T_TCP_CAM @ T_cam_tag
+
+
 def tag_position_in_base(tcp_pose, T_cam_tag):
-    return (pose_to_matrix(tcp_pose) @ T_TCP_CAM @ T_cam_tag)[:3, 3]
+    return tag_pose_in_base(tcp_pose, T_cam_tag)[:3, 3]
+
+
+def tag_tilt_deg(T_base_tag):
+    """Angle between the tag normal (its Z axis, out of the printed face) and vertical."""
+    return np.degrees(angle_between(T_base_tag[:3, 2], [0, 0, 1]))
 
 
 # --- robot tasks ----------------------------------------------------------------
@@ -262,16 +335,20 @@ def tag_position_in_base(tcp_pose, T_cam_tag):
 # a new command to the robot and returns quickly, so the video never freezes.
 
 class PickTask:
-    def __init__(self, r, c, suction, tag_id, tag_pos, tcp_pose):
+    def __init__(self, r, c, suction, tag_id, T_base_tag, tcp_pose):
         self.r = r
         self.c = c
         self.suction = suction
         self.tag_id = tag_id
-        self.tag_pos = np.asarray(tag_pos)
-        self.orientation = tcp_pose[3:]   # keep the tool orientation (pointing down)
-        self.cam_offset_base = pose_to_matrix(tcp_pose)[:3, :3] @ T_TCP_CAM[:3, 3]
+        self.tag_pos = T_base_tag[:3, 3].copy()
+        self.normal = T_base_tag[:3, 2].copy()   # out of the tag face, towards the camera
+        # Target tool orientation: tool Z (suction direction) into the tag.
+        # Start from the current orientation and turn it the least possible.
+        self.R_target = pose_to_matrix(tcp_pose)[:3, :3]
+        self._align_target()
         self.stage = "hover"
         self.stage_start = time.time()
+        self.push_dir = None
         self.lift_target = None
         self.done = False
         self.status = ""
@@ -281,49 +358,82 @@ class PickTask:
         self.stage = stage
         self.stage_start = time.time()
 
+    def _approach_normal(self):
+        return snap_normal(self.normal)
+
+    def _align_target(self):
+        """Turn R_target the least possible so tool Z points against the tag normal."""
+        n = self._approach_normal()
+        self.R_target = rotation_between(self.R_target[:, 2], -n) @ self.R_target
+
     def _track(self, tags, tcp_pose):
-        """Update the running estimate of the tag position from this frame."""
+        """Update the running estimate of the tag pose from this frame."""
         for tag_id, _, T_cam_tag in tags:
             if tag_id != self.tag_id:
                 continue
-            measured = tag_position_in_base(tcp_pose, T_cam_tag)
+            T = tag_pose_in_base(tcp_pose, T_cam_tag)
+            measured, normal = T[:3, 3], T[:3, 2]
             if np.linalg.norm(measured - self.tag_pos) > TRACK_MAX_JUMP:
                 return False
+            if angle_between(normal, self.normal) > np.radians(TRACK_MAX_TURN_DEG):
+                return False
             self.tag_pos += TRACK_SMOOTHING * (measured - self.tag_pos)
+            self.normal += TRACK_SMOOTHING * (normal - self.normal)
+            self.normal /= np.linalg.norm(self.normal)
+            self._align_target()
             return True
         return False
 
-    def _servo(self, tcp_pose, target):
-        """One speedL step towards target; returns remaining distance."""
+    def _servo(self, tcp_pose, target, R_target=None):
+        """One speedL step towards target (and R_target); returns (distance, angle) left."""
         target = np.array(target, dtype=float)
-        target[2] = max(target[2], MIN_TCP_Z)
+        target[2] = min(max(target[2], MIN_TCP_Z), MAX_TCP_Z)
         error = target - np.asarray(tcp_pose[:3])
         dist = np.linalg.norm(error)
         velocity = SERVO_GAIN * error
         speed = np.linalg.norm(velocity)
         if speed > SERVO_MAX_SPEED:
             velocity *= SERVO_MAX_SPEED / speed
-        self.c.speedL(list(velocity) + [0, 0, 0], SERVO_ACCEL, SPEED_CMD_TIME)
-        return dist
+
+        omega = np.zeros(3)
+        angle = 0.0
+        if R_target is not None:
+            rot_error = rotation_error(R_target, pose_to_matrix(tcp_pose)[:3, :3])
+            angle = np.linalg.norm(rot_error)
+            omega = SERVO_ROT_GAIN * rot_error
+            rot_speed = np.linalg.norm(omega)
+            if rot_speed > SERVO_MAX_ROT_SPEED:
+                omega *= SERVO_MAX_ROT_SPEED / rot_speed
+
+        self.c.speedL(list(velocity) + list(omega), SERVO_ACCEL, SPEED_CMD_TIME)
+        return dist, angle
+
+    def _arrived(self, dist, angle):
+        return dist < SERVO_TOLERANCE and angle < np.radians(SERVO_ROT_TOLERANCE_DEG)
 
     def update(self, tags, tcp_pose):
         seen = self._track(tags, tcp_pose)
         tag_info = "tag seen" if seen else "tag not seen, using last estimate"
+        n = self._approach_normal()
 
         if self.stage == "hover":
-            # Camera straight above the tag, so it's well centered in view
-            target = self.tag_pos + [0, 0, HOVER_HEIGHT] - self.cam_offset_base
-            dist = self._servo(tcp_pose, target)
-            self.status = f"hover: {dist * 1000:.0f} mm to go ({tag_info})"
-            if dist < SERVO_TOLERANCE:
+            # Camera in front of the tag along its normal, so it's well centered in view
+            cam_offset_base = self.R_target @ T_TCP_CAM[:3, 3]
+            target = self.tag_pos + n * HOVER_HEIGHT - cam_offset_base
+            dist, angle = self._servo(tcp_pose, target, self.R_target)
+            self.status = (f"hover: {dist * 1000:.0f} mm, {np.degrees(angle):.0f} deg "
+                           f"to go ({tag_info})")
+            if self._arrived(dist, angle):
                 self._next("approach")
 
         elif self.stage == "approach":
-            target = self.tag_pos + [0, 0, APPROACH_HEIGHT]
-            dist = self._servo(tcp_pose, target)
-            self.status = f"approach: {dist * 1000:.0f} mm to go ({tag_info})"
-            if dist < SERVO_TOLERANCE:
+            target = self.tag_pos + n * APPROACH_HEIGHT
+            dist, angle = self._servo(tcp_pose, target, self.R_target)
+            self.status = (f"approach: {dist * 1000:.0f} mm, {np.degrees(angle):.0f} deg "
+                           f"to go ({tag_info})")
+            if self._arrived(dist, angle):
                 self._next("zero_ft")
+                self.push_dir = -n   # freeze the direction for the final push
                 self.c.zeroFtSensor()
                 self.suction.grip()
 
@@ -334,27 +444,45 @@ class PickTask:
 
         elif self.stage == "descend":
             force = np.linalg.norm(self.r.getActualTCPForce()[:3])
-            min_z = max(self.tag_pos[2] - MAX_OVERSHOOT, MIN_TCP_Z)
+            # How far the cup is past the tag surface, along the push direction
+            depth = np.dot(np.asarray(tcp_pose[:3]) - self.tag_pos, self.push_dir)
             self.status = f"descend: force {force:.1f} N"
             if force > CONTACT_FORCE:
                 print("Contact")
                 self._next("dwell")
-            elif tcp_pose[2] <= min_z:
+            elif depth >= MAX_OVERSHOOT or (self.push_dir[2] < 0 and tcp_pose[2] <= MIN_TCP_Z):
                 print("No contact detected, reached max depth")
                 self._next("dwell")
             else:
-                self.c.speedL([0, 0, -DESCEND_SPEED, 0, 0, 0], DESCEND_ACCEL, SPEED_CMD_TIME)
+                self.c.speedL(list(self.push_dir * DESCEND_SPEED) + [0, 0, 0],
+                              DESCEND_ACCEL, SPEED_CMD_TIME)
 
         elif self.stage == "dwell":
-            self.status = "gripping"
-            if time.time() - self.stage_start > GRIP_DWELL:
-                self.lift_target = np.asarray(tcp_pose[:3]) + [0, 0, LIFT_HEIGHT]
+            # Lift only once the controller confirms the object is held
+            # ("UNKNOWN" = no pressure sensor, so lift after the dwell anyway)
+            result = self.suction.grip_result()
+            elapsed = time.time() - self.stage_start
+            self.status = f"gripping, waiting for vacuum ({result or 'no report yet'})"
+            if elapsed > GRIP_DWELL and result in ("OK", "UNKNOWN"):
+                # Back off the way we came in
+                self.lift_target = np.asarray(tcp_pose[:3]) - self.push_dir * LIFT_HEIGHT
                 self._next("lift")
+            elif elapsed > GRIP_CONFIRM_TIMEOUT:
+                print(f"Grip not confirmed (last report: {result}), releasing")
+                self.suction.release()
+                self.c.speedStop()
+                self.status = "grip failed, vacuum off (p to retry)"
+                self.done = True
 
         elif self.stage == "lift":
-            dist = self._servo(tcp_pose, self.lift_target)
+            dist, _ = self._servo(tcp_pose, self.lift_target)
             self.status = f"lift: {dist * 1000:.0f} mm to go"
-            if dist < SERVO_TOLERANCE:
+            if self.suction.grip_result() == "LOST":
+                print("Object lost while lifting")
+                self.c.speedStop()
+                self.status = "object lost while lifting (r to release)"
+                self.done = True
+            elif dist < SERVO_TOLERANCE:
                 self.c.speedStop()
                 self.status = "picked (r to release)"
                 self.done = True
@@ -368,6 +496,11 @@ class HomeTask:
         self.c = c
         self.start = time.time()
         self.done = False
+        home_z = c.getForwardKinematics(HOME_Q)[2]
+        if home_z > MAX_TCP_Z:
+            self.status = f"home is above the ceiling ({home_z:.3f} > {MAX_TCP_Z:.3f} m), not moving"
+            self.done = True
+            return
         self.status = "going home..."
         c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL, True)   # asynchronous
 
@@ -379,6 +512,32 @@ class HomeTask:
 
     def abort(self):
         self.c.stopJ()
+
+
+# --- suction ------------------------------------------------------------------
+
+class NoSuction:
+    """Stand-in when the suction controller isn't connected: only prints."""
+
+    def grip(self):
+        print("(no gripper) grip")
+
+    def grip_result(self):
+        return "UNKNOWN"   # like the controller without a pressure sensor
+
+    def release(self):
+        print("(no gripper) release")
+
+    def close(self):
+        pass
+
+
+def connect_suction():
+    try:
+        return Suction()
+    except (SerialException, OSError) as e:
+        print(f"Suction gripper not available ({e}), running without it")
+        return NoSuction()
 
 
 # --- gamepad ------------------------------------------------------------------
@@ -393,52 +552,6 @@ GAMEPAD_KEYS = {
 }
 
 
-class GamepadControl:
-    def __init__(self):
-        if not devices.gamepads:
-            print("No gamepad found, keyboard only")
-        self._gamepad = Gamepad()
-        self._gamepad.listen()
-        self._was_pressed = {name: False for name in GAMEPAD_KEYS}
-
-    def poll_keys(self):
-        """Keys for gamepad buttons pressed since the last call.
-
-        pygamepad's is_just_pressed only lasts 20 ms, shorter than one video
-        frame, so we detect the press edges ourselves.
-        """
-        keys = []
-        for name, key in GAMEPAD_KEYS.items():
-            pressed = bool(getattr(self._gamepad.buttons, name).value)
-            if pressed and not self._was_pressed[name]:
-                keys.append(key)
-            self._was_pressed[name] = pressed
-        return keys
-
-    def jog_speed(self):
-        """speedL vector from the sticks, same mapping as gamepad_robot_teleop.py, or None."""
-        b = self._gamepad.buttons
-        x = apply_deadzone(b.ABS_X.value)
-        y = apply_deadzone(b.ABS_Y.value)
-        trigger = apply_deadzone(b.ABS_RZ.value - b.ABS_Z.value)
-        if x == 0 and y == 0 and trigger == 0:
-            return None
-
-        speed = [0.0] * 6
-        if b.BTN_TR.value:
-            speed[3] = x * MAX_ROTATION_SPEED
-            speed[4] = y * MAX_ROTATION_SPEED
-            speed[5] = trigger * MAX_ROTATION_SPEED
-        else:
-            speed[0] = y * MAX_LINEAR_SPEED
-            speed[1] = x * MAX_LINEAR_SPEED
-            speed[2] = trigger * MAX_Z_SPEED
-        return speed
-
-    def close(self):
-        self._gamepad.stop_listening()
-
-
 # --- display ------------------------------------------------------------------
 
 def draw(frame, tags, chosen, tcp_pose, status, camera_matrix, dist_coeffs):
@@ -451,10 +564,13 @@ def draw(frame, tags, chosen, tcp_pose, status, camera_matrix, dist_coeffs):
         cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, rvec, T_cam_tag[:3, 3],
                           TAG_SIZE * AXES_LENGTH, 2)
         base = tag_position_in_base(tcp_pose, T_cam_tag)
+        tcp = (T_TCP_CAM @ T_cam_tag)[:3, 3]   # tag position in the tool frame
         x, y = pts[0]
-        cv2.putText(frame, f"id {tag_id}  cam z {T_cam_tag[2, 3]:.3f}", (x, y - 28),
+        cv2.putText(frame, f"id {tag_id}  cam z {T_cam_tag[2, 3]:.3f}", (x, y - 46),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-        cv2.putText(frame, "base {:.3f} {:.3f} {:.3f}".format(*base), (x, y - 10),
+        cv2.putText(frame, "base {:.3f} {:.3f} {:.3f}".format(*base), (x, y - 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        cv2.putText(frame, "tcp  {:.3f} {:.3f} {:.3f}".format(*tcp), (x, y - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
     h, w = frame.shape[:2]
     cv2.drawMarker(frame, (w // 2, h // 2), (255, 255, 255), cv2.MARKER_CROSS, 20, 1)
@@ -466,8 +582,8 @@ def draw(frame, tags, chosen, tcp_pose, status, camera_matrix, dist_coeffs):
 def main():
     camera = Camera()
     detector = TagDetector(camera.camera_matrix, camera.dist_coeffs)
-    suction = Suction()
-    gamepad = GamepadControl()
+    suction = connect_suction()
+    gamepad = GamepadControl(GAMEPAD_KEYS)
 
     r = rtde_receive.RTDEReceiveInterface(IP)
     c = rtde_control.RTDEControlInterface(IP)
@@ -516,9 +632,13 @@ def main():
                             status = "no tag in view"
                         else:
                             tag_id, _, T_cam_tag = chosen
-                            print(f"Picking tag {tag_id}")
-                            task = PickTask(r, c, suction, tag_id,
-                                            tag_position_in_base(tcp_pose, T_cam_tag), tcp_pose)
+                            T_base_tag = tag_pose_in_base(tcp_pose, T_cam_tag)
+                            tilt = tag_tilt_deg(T_base_tag)
+                            if tilt > MAX_TILT_DEG:
+                                status = f"tag {tag_id} tilted {tilt:.0f} deg, too far to pick"
+                            else:
+                                print(f"Picking tag {tag_id} (tilt {tilt:.0f} deg)")
+                                task = PickTask(r, c, suction, tag_id, T_base_tag, tcp_pose)
                     elif key == "h" and task is None and not jogging:
                         task = HomeTask(c)
                     elif key == "g":
@@ -530,6 +650,8 @@ def main():
 
                 jog = gamepad.jog_speed()
                 if jog is not None:
+                    # Slow down upwards motion near the ceiling, only allow down above it
+                    jog[2] = min(jog[2], max(0.0, CEILING_JOG_GAIN * (MAX_TCP_Z - tcp_pose[2])))
                     if task is not None:
                         task.abort()
                         task = None
@@ -546,6 +668,15 @@ def main():
                     status = task.status
                     if task.done:
                         task = None
+
+                # Last line of defence for tasks (e.g. a moveJ home arcing upwards).
+                # Jogging is not stopped here: it is already capped above, and
+                # the user has to be able to jog back down.
+                if task is not None and tcp_pose[2] > MAX_TCP_Z + CEILING_MARGIN:
+                    task.abort()
+                    task = None
+                    status = f"above ceiling ({tcp_pose[2]:.3f} m), stopped - jog down"
+                    print(status)
             except Exception as e:
                 print(f"Robot error: {e}")
                 status = f"error: {e}"

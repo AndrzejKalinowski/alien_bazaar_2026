@@ -1,17 +1,12 @@
 import rtde_control, rtde_receive
 from time import sleep
-from pygamepad.gamepads import Gamepad
+from gamepad_jog import GamepadControl, Jogger
 from suction import Suction
 
 IP = "192.168.1.20"
 
 HOME_Q = [0, -1.57, 1.57, -1.57, -1.57, 0]
 
-MAX_LINEAR_SPEED = 0.15    # m/s at full stick deflection
-MAX_ROTATION_SPEED = 0.4   # rad/s at full stick deflection
-MAX_Z_SPEED = 0.15         # m/s at full trigger press
-
-SPEED_ACCEL = 0.6       # m/s^2 (or rad/s^2), smooths out stick changes
 LOOP_DT = 0.02          # seconds per control loop tick
 
 HOME_SPEED = 1.0
@@ -86,60 +81,33 @@ def recover_from_fault(r, c):
 
 
 def main():
-    gamepad = Gamepad()
-    gamepad.listen()
+    gamepad = GamepadControl(GAMEPAD_KEYS)
 
     suction = Suction()
 
     r, c = connect_rtde()
+    jogger = Jogger(c, gamepad)
 
     try:
         while True:
             try:
-                b = gamepad.buttons
+                keys = gamepad.poll_keys()
 
-                if b.BTN_START.is_just_pressed:
+                if "h" in keys:
                     print("Go home")
-                    c.speedStop()
+                    jogger.stop()
                     c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL)
-                    sleep(0.1)
                     continue
 
-                if b.BTN_EAST.is_just_pressed:
+                if "g" in keys:
                     print("Grip")
                     suction.grip()
-                    sleep(0.1)
-                    continue
 
-                if b.BTN_WEST.is_just_pressed:
+                if "r" in keys:
                     print("Release")
                     suction.release()
-                    sleep(0.1)
-                    continue
 
-                rotation_mode = b.BTN_TR.value
-
-                x = apply_deadzone(b.ABS_X.value)
-                y = apply_deadzone(b.ABS_Y.value)
-                trigger = apply_deadzone(b.ABS_RZ.value - b.ABS_Z.value)
-
-                if x == 0 and y == 0 and trigger == 0:
-                    c.speedStop()
-                    sleep(LOOP_DT)
-                    continue
-
-                speed = [0.0] * 6
-
-                if rotation_mode:
-                    speed[3] = x * MAX_ROTATION_SPEED
-                    speed[4] = y * MAX_ROTATION_SPEED
-                    speed[5] = trigger * MAX_ROTATION_SPEED
-                else:
-                    speed[0] = y * MAX_LINEAR_SPEED
-                    speed[1] = x * MAX_LINEAR_SPEED
-                    speed[2] = trigger * MAX_Z_SPEED
-
-                c.speedL(speed, SPEED_ACCEL, LOOP_DT)
+                jogger.update()
                 sleep(LOOP_DT)
             except (KeyboardInterrupt, SystemExit):
                 raise
@@ -147,13 +115,14 @@ def main():
                 print(f"Robot error: {e}. Attempting to recover without restarting...")
                 sleep(ERROR_RETRY_DELAY)
                 r, c = recover_from_fault(r, c)
+                jogger = Jogger(c, gamepad)
     except (KeyboardInterrupt, SystemExit):
         try:
             c.speedStop()
             c.stopScript()
         except Exception:
             pass
-        gamepad.stop_listening()
+        gamepad.close()
         suction.close()
         exit()
 

@@ -33,7 +33,8 @@ Tip: measure across several squares and divide, e.g. 7 squares = 149.1 mm
 -> --square 21.3; that's more precise than measuring one square.
 
 Uses the same CAMERA_INDEX / FRAME_WIDTH / FRAME_HEIGHT as follow_april_tag.py;
-the calibration is only valid for that resolution.
+the calibration is only valid for that resolution. For the overhead camera of
+find_glasses.py:  --camera 1 --output overhead_camera_calibration.npz
 """
 
 import argparse
@@ -74,6 +75,10 @@ def parse_args():
     parser.add_argument("--marker", type=float, help="measured marker size in mm")
     parser.add_argument("--scale-bar", type=float,
                         help=f"measured length in mm of the {SCALE_BAR:.0f} mm scale bar")
+    parser.add_argument("--camera", type=int, default=CAMERA_INDEX,
+                        help="camera index (e.g. the overhead camera for find_glasses.py)")
+    parser.add_argument("--output", default=CALIBRATION_FILE,
+                        help="output file (find_glasses.py wants overhead_camera_calibration.npz)")
     args = parser.parse_args()
 
     if args.scale_bar is not None and args.square is not None:
@@ -113,7 +118,7 @@ def print_board(args):
           "Print it at 100% scale.")
 
 
-def calibrate(board, views, image_size):
+def calibrate(board, views, image_size, output):
     object_points, image_points = [], []
     for corners, ids in views:
         obj, img = board.matchImagePoints(corners, ids)
@@ -131,9 +136,9 @@ def calibrate(board, views, image_size):
     hfov = np.degrees(2 * np.arctan(image_size[0] / (2 * camera_matrix[0, 0])))
     print(f"Horizontal field of view: {hfov:.1f} deg")
 
-    np.savez(CALIBRATION_FILE, camera_matrix=camera_matrix, dist_coeffs=dist_coeffs,
+    np.savez(output, camera_matrix=camera_matrix, dist_coeffs=dist_coeffs,
              image_size=np.array(image_size))
-    print(f"Saved {CALIBRATION_FILE}")
+    print(f"Saved {output}")
     return error
 
 
@@ -148,11 +153,11 @@ def main():
     board = make_board(args)
     detector = cv2.aruco.CharucoDetector(board)
 
-    cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+    cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
     if not cap.isOpened():
-        raise RuntimeError(f"Could not open camera {CAMERA_INDEX}")
+        raise RuntimeError(f"Could not open camera {args.camera}")
 
     views = []
     # Where saved views had corners, so you can see which parts of the image are covered
@@ -201,7 +206,7 @@ def main():
                 if len(views) < MIN_VIEWS:
                     status = f"need at least {MIN_VIEWS} views"
                 else:
-                    error = calibrate(board, views, image_size)
+                    error = calibrate(board, views, image_size, args.output)
                     status = f"saved, error {error:.2f} px (q to quit)"
     finally:
         cap.release()
