@@ -430,7 +430,7 @@ These are software guards, **not** a replacement for the UR safety configuration
 | Guard | Value | Where | Effect |
 |---|---|---|---|
 | `MIN_TCP_Z` | −0.05 m | `follow_april_tag.py`, `find_glasses.py` | Targets are clamped above this height (table guard) |
-| `MAX_TCP_Z` | 0.60 m | `follow_april_tag.py` | Targets are clamped below it. Jogging up slows near it. In `follow_april_tag` a task more than 2 cm above it is aborted, and home is refused if it is above the ceiling |
+| `MAX_TCP_Z` | 0.60 m | `safe_motion.py` (all active scripts) | Every script sends motion through `SafeControl`. A `moveL` target above it, or a `moveJ` whose arc goes above it, is refused (`MotionRefused`) before anything is sent. `speedL` (jogging, servoing) slows near it and cannot go up past it. Tasks more than 2 cm above it are aborted. Only the TCP is limited; also set a safety plane on the pendant |
 | `MAX_OVERSHOOT` | 20 mm / 15 mm | tag picker / glass pick-place | The farthest a force-guarded push may go past the expected surface |
 | `CONTACT_FORCE` / `PLACE_FORCE` | 12 N / 10 N / 8 N | tag pick / glass pick / glass place | Descent stops above this force |
 | `CAMERA_TIMEOUT` | 0.5 s | `follow_april_tag.py` | No new frame → `speedStop` |

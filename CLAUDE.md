@@ -9,6 +9,7 @@ Hackathon code (Alien Bazaar 2026, team Rabyte) for a **UR5e robot arm with a cu
 ## This code moves real hardware
 
 - **Never run** a script that connects to the robot (`192.168.1.20`), the gripper or the servos unless the user explicitly asks. Anything that imports `rtde_control` and constructs `RTDEControlInterface` can move the arm. Offline checks are always fine: `compileall` (below), pure-function tests. Note that `--help` still imports the module, and some modules connect or open ports only inside `main()`, so check first.
+- **All motion goes through `safe_motion.SafeControl`.** Do not construct `RTDEControlInterface` directly in new code. A new motion command must get a ceiling check there; until it has one, it stays in `UNCHECKED_MOTION`.
 - **Do not loosen safety limits silently.** This covers `MIN_TCP_Z`, `MAX_TCP_Z`, `MAX_OVERSHOOT`, `CONTACT_FORCE`/`PLACE_FORCE`, speed and acceleration constants, `CAMERA_TIMEOUT` and tilt checks. If a change needs it, say so explicitly.
 - **Always pass a non-zero time to `speedL`** (`SPEED_CMD_TIME = 0.02`). `time=0` makes the robot protective-stop (C271A1). `speedL` keeps moving until the next command or `speedStop`. Never add code that blocks the main loop while a `speedL` is active; call `jogger.stop()` / `speedStop()` first.
 - Every exit path must stop motion: keep the `try/finally` blocks that call `speedStop` / `stopL` / `stopScript`.
@@ -18,6 +19,7 @@ Hackathon code (Alien Bazaar 2026, team Rabyte) for a **UR5e robot arm with a cu
 - `ur5e_experiments/`: all robot code. Flat scripts, no package. Run from this directory (imports are sibling-module imports).
   - `pick_place_glasses.py`: main demo (generator-based `Task`s stepped once per video frame).
   - `find_glasses.py`: `GlassFinder` (Hough circles + HSV rim filter + back-projection to base frame), `AreaEditor`, overhead-camera calibration (`--calibrate`). It is both a tool and a library.
+  - `safe_motion.py`: `SafeControl`, the motion controller. It wraps `RTDEControlInterface` and enforces the `MAX_TCP_Z` ceiling on `moveL`, `moveJ` and `speedL`. Connect with `r, c = safe_motion.connect(IP)`, never with `rtde_control` directly.
   - `follow_april_tag.py`: wrist-camera tag picker **and the de facto shared module**: `IP`, `HOME_Q`, `MIN/MAX_TCP_Z`, `TAG_DICTIONARY`, `TAG_SIZE`, `pose_to_matrix`, `Camera`, `TagDetector`, `connect_suction`. Importing it has side effects (it loads `hand_eye.npz` and needs `ur_rtde`).
   - `gamepad_jog.py`: `GamepadControl` (button → key edges, stick → speed vector), `Jogger`.
   - `suction.py`: host driver for the gripper serial protocol.

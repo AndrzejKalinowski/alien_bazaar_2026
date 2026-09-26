@@ -42,6 +42,7 @@ The firmware answers `GRIP` with `ERR BUSY` while it is `GRIPPING` ([Gripper/src
 **4. Jogging has no ceiling or floor guard outside `follow_april_tag.py`**
 `follow_april_tag.py` caps upward jog speed near `MAX_TCP_Z`, but `Jogger` ([gamepad_jog.py:98](ur5e_experiments/gamepad_jog.py#L98)), used by `find_glasses.py`, `pick_place_glasses.py` and `gamepad_robot_teleop.py`, sends raw stick speeds with no Z limits. `HomeTask` in [pick_place_glasses.py:126](ur5e_experiments/pick_place_glasses.py#L126) also skips the "home above ceiling" check that `follow_april_tag.HomeTask` has.
 *Fix:* move the ceiling cap (and a `MIN_TCP_Z` floor cap) into `Jogger.update()` by passing it the current TCP pose, so every script gets the same limits.
+*Status (2026-09-26):* ceiling fixed. `safe_motion.SafeControl` wraps the control interface in every active script. It caps `speedL`, and it checks `moveL` and the `moveJ` arc (including home) against `MAX_TCP_Z`. The floor (`MIN_TCP_Z`) is still not enforced for jogging.
 
 ### Medium
 

@@ -20,33 +20,65 @@ Sequence (p / gamepad Y):
   The tool keeps the orientation it has at the start, which must be pointing
   down (e.g. after h / home).
 
+Side grip (PICK_FROM_SIDE = True): the suction cup grabs the glass wall at
+SIDE_GRIP_HEIGHT above the table instead of the foot on top.
+  3. Up, then the tool turns horizontal (pointing from the robot base towards
+     the glass, turned by SIDE_APPROACH_YAW_DEG), over to SIDE_STANDOFF in front
+     of the wall at carry height, down to SIDE_GRIP_HEIGHT, vacuum on, slowly
+     sideways into the wall. A glass slides at ~1 N, long before the force
+     sensor notices, so this stops at the expected wall + SIDE_MAX_PRESS (the
+     force limit only guards against hitting something solid). Wait for
+     "GRIP OK".
+  4. Lift, carry so the glass axis is over the tag (the tool keeps its
+     orientation), slowly down until the glass touches the table, release,
+     back off SIDE_STANDOFF sideways, up.
+  5. Over the start position the tool turns back to its start orientation.
+  The start orientation can be anything (no pointing-down check), e.g. already
+  sideways; the turn to the side orientation happens over the start position.
+  The grip orientation is taught: jog the cup onto a glass wall exactly as it
+  should grip (hold RB for rotation) and press o. It prints SIDE_GRIP_ROTATION
+  (the tool orientation in the base frame, used as it is for every glass, the
+  approach runs along its tool z axis) and SIDE_GRIP_HEIGHT; copy them into
+  the constants. With SIDE_GRIP_ROTATION = None the tool is held level instead,
+  set by SIDE_APPROACH_YAW_DEG (relative to the base -> glass direction) and
+  SIDE_ROLL_DEG (the turn around the tool's own axis: 0 = tool x axis pointing
+  straight down, positive = right-hand around the approach direction); o
+  prints those too when the tool is roughly level.
+  The wall radius at the grip height is SIDE_GRIP_RADIUS, or half the measured
+  foot diameter for straight-sided glasses. The approach path is not checked:
+  the gripper must fit between the glasses on the robot side of the target.
+
 Keys (video window) / gamepad:
   p  / Y (north)   pick & place one glass
   s  / A (south)   stop / abort (vacuum stays as it is)
   g  / B (east)    grip (vacuum on)
   r  / X (west)    release
   h  / Start       go home (HOME_Q from follow_april_tag.py, tool pointing down)
+  o                print the side grip constants of the current tool pose
   q / Esc          quit
   Sticks jog the robot (gamepad_jog.py); touching them aborts a running task.
   The mouse edits the detection area as in find_glasses.py.
+
+All motion goes through safe_motion.py: the TCP never goes above MAX_TCP_Z
+(0.60 m above the base). A move that would is refused and the task stops.
 
 The place tag (PLACE_TAG_ID, any 36h11 size) lies flat on the table inside
 the camera view; its last seen position is kept, since the placed glass covers
 it. It is shown as a cyan square in the video and on the map.
 
-Requires: pip install opencv-python ur_rtde pyserial
+Requires: pip install opencv-python ur_rtde pyserial numpy
 """
 
 import time
 
 import cv2
 import numpy as np
-import rtde_control
-import rtde_receive
 
 import find_glasses as fg
+import safe_motion
 from follow_april_tag import HOME_Q, IP, MAX_TCP_Z, MIN_TCP_Z, connect_suction
 from gamepad_jog import GamepadControl, Jogger
+from safe_motion import MotionRefused
 
 PLACE_TAG_ID = None          # None = the lowest id in view
 PLACED_RADIUS = 0.04         # m, a glass this close to the tag already stands on it
@@ -56,7 +88,21 @@ APPROACH_GAP = 0.02          # m, stop this far above the foot / placing height,
 MAX_OVERSHOOT = 0.015        # m, push at most this far past the expected height
 MAX_TILT_DEG = 10            # tool must point down within this at the start
 
-MOVE_SPEED = 0.8            # m/s, moveL
+# --- side grip ------------------------------------------------------------------
+PICK_FROM_SIDE = True        # grab the glass wall with the tool horizontal instead of the foot
+SIDE_GRIP_HEIGHT = 0.0394    # m above the table, cup center (TCP) on the wall (taught pose); the gripper must clear the table here
+SIDE_GRIP_RADIUS = None      # m, glass radius at SIDE_GRIP_HEIGHT, None = measured foot diameter / 2
+# Taught grip orientation, axis-angle in the base frame (o key prints it), used for
+# every glass; the approach runs along its tool z axis (here base -y, 3 deg down).
+# None = level tool built from SIDE_APPROACH_YAW_DEG / SIDE_ROLL_DEG instead.
+SIDE_GRIP_ROTATION = [1.53266, 0.62846, -0.5963]
+SIDE_APPROACH_YAW_DEG = 4    # deg, turn the approach from radial (base -> glass) around vertical
+SIDE_ROLL_DEG = 45           # deg, tool turned around its own axis: 0 = tool x straight down (o key reads it off)
+SIDE_STANDOFF = 0.03         # m, gap between cup and wall before the slow approach and after release
+SIDE_MAX_PRESS = 0.006       # m, go at most this far past the expected wall (camera error, cup compression)
+SIDE_CONTACT_FORCE = 5.0     # N, stop the sideways approach early (a free glass slides before this)
+
+MOVE_SPEED = 0.15            # m/s, moveL
 MOVE_ACCEL = 0.6             # m/s^2 (keep low enough for the vacuum to hold the glass)
 DESCEND_SPEED = 0.015        # m/s, slow final approach
 DESCEND_ACCEL = 0.2
@@ -97,7 +143,7 @@ class Task:
             self.status = next(self._steps)
         except StopIteration:
             self.done = True
-        except TaskFailed as e:
+        except (TaskFailed, MotionRefused) as e:
             print(e)
             self.c.speedStop(STOP_DECEL)
             self.status = str(e)
@@ -143,41 +189,69 @@ class PickPlaceTask(Task):
         self.rim_height = rim_height
         super().__init__(r, c)
 
-    def move_to(self, xyz, label, holding=False):
+    def move_to(self, xyz, label, holding=False, rotation=None):
         xyz = [xyz[0], xyz[1], min(max(xyz[2], MIN_TCP_Z), MAX_TCP_Z)]
-        self.c.moveL(xyz + self.rotation, MOVE_SPEED, MOVE_ACCEL, True)
+        rotation = self.rotation if rotation is None else rotation
+        self.c.moveL(xyz + list(rotation), MOVE_SPEED, MOVE_ACCEL, True)
         for status in self.wait_move(label):
             if holding and self.suction.grip_result() == "LOST":
                 self.c.stopL(STOP_DECEL)
                 raise TaskFailed("glass lost while carrying (vacuum still on, r to release)")
             yield status
 
-    def push_down(self, stop_z, force_limit, label):
-        """Slowly down until the force sensor feels contact or stop_z is reached."""
+    def push(self, direction, max_travel, force_limit, label):
+        """Slowly along direction until the force sensor feels contact or max_travel is covered."""
+        direction = np.asarray(direction, dtype=float)
+        direction /= np.linalg.norm(direction)
         self.c.zeroFtSensor()
         yield from self.wait(FT_SETTLE, f"{label}: zeroing force sensor")
+        start = np.asarray(self.r.getActualTCPPose()[:3])
         while True:
             force = np.linalg.norm(self.r.getActualTCPForce()[:3])
-            z = self.r.getActualTCPPose()[2]
+            pos = np.asarray(self.r.getActualTCPPose()[:3])
             if force > force_limit:
                 self.c.speedStop(STOP_DECEL)
                 print(f"{label}: contact ({force:.1f} N)")
                 return
-            if z <= max(stop_z, MIN_TCP_Z):
+            if (pos - start) @ direction >= max_travel or (direction[2] < 0 and pos[2] <= MIN_TCP_Z):
                 self.c.speedStop(STOP_DECEL)
                 print(f"{label}: no contact felt, reached max depth")
                 return
-            self.c.speedL([0, 0, -DESCEND_SPEED, 0, 0, 0], DESCEND_ACCEL, SPEED_CMD_TIME)
+            self.c.speedL(list(direction * DESCEND_SPEED) + [0, 0, 0], DESCEND_ACCEL, SPEED_CMD_TIME)
             yield f"{label}: force {force:.1f} N"
 
-    def run(self):
+    def push_down(self, stop_z, force_limit, label):
+        """Slowly down until the force sensor feels contact or stop_z is reached."""
+        z = self.r.getActualTCPPose()[2]
+        yield from self.push([0, 0, -1], z - stop_z, force_limit, label)
+
+    def wait_for_grip(self, back_off):
+        """Wait for the vacuum; on failure release and move through the back_off points."""
+        grip_start = time.time()
+        while True:
+            result = self.suction.grip_result()
+            elapsed = time.time() - grip_start
+            if elapsed > GRIP_DWELL and result in ("OK", "UNKNOWN"):
+                return
+            if elapsed > GRIP_CONFIRM_TIMEOUT:
+                self.suction.release()
+                for xyz in back_off:
+                    yield from self.move_to(xyz, "grip failed, backing off")
+                raise TaskFailed(f"grip not confirmed ({result}), released (p to retry)")
+            yield f"gripping, waiting for vacuum ({result or 'no report yet'})"
+
+    def check_start(self):
+        """Start pose, after checking that the tool points down."""
         start = self.r.getActualTCPPose()
         R = cv2.Rodrigues(np.asarray(start[3:], dtype=float))[0]
         tilt = np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1)))
         if tilt > MAX_TILT_DEG:
             raise TaskFailed(f"tool is {tilt:.0f} deg from pointing down, go home (h) first")
         self.rotation = list(start[3:])
+        return start
 
+    def run(self):
+        start = self.check_start()
         g = self.glass
         foot_z = self.table_z + self.rim_height       # tip height on top of the glass
         # The carried glass hangs rim_height below the tip, over glasses rim_height tall
@@ -195,17 +269,7 @@ class PickPlaceTask(Task):
         self.suction.grip()
         yield from self.push_down(foot_z - MAX_OVERSHOOT, CONTACT_FORCE, "pick")
 
-        grip_start = time.time()
-        while True:
-            result = self.suction.grip_result()
-            elapsed = time.time() - grip_start
-            if elapsed > GRIP_DWELL and result in ("OK", "UNKNOWN"):
-                break
-            if elapsed > GRIP_CONFIRM_TIMEOUT:
-                self.suction.release()
-                yield from self.move_to([g.x, g.y, carry_z], "grip failed, backing off")
-                raise TaskFailed(f"grip not confirmed ({result}), released (p to retry)")
-            yield f"gripping, waiting for vacuum ({result or 'no report yet'})"
+        yield from self.wait_for_grip([[g.x, g.y, carry_z]])
 
         # Carry and place
         yield from self.move_to([g.x, g.y, carry_z], "lift", holding=True)
@@ -219,6 +283,106 @@ class PickPlaceTask(Task):
         yield from self.move_to([tx, ty, carry_z], "up")
         yield from self.move_to([start[0], start[1], max(start[2], carry_z)], "back")
         yield from self.move_to(start[:3], "back")
+        self.status = "placed"
+
+
+def side_rotation(direction, roll_deg):
+    """Axis-angle rotation with the tool z axis along the horizontal direction and the
+    tool x axis turned roll_deg (right-hand around tool z) away from straight down."""
+    z = np.array([direction[0], direction[1], 0.0])
+    z /= np.linalg.norm(z)
+    down = np.array([0.0, 0.0, -1.0])
+    roll = np.radians(roll_deg)
+    x = np.cos(roll) * down + np.sin(roll) * np.cross(z, down)
+    R = np.column_stack([x, np.cross(z, x), z])
+    return list(cv2.Rodrigues(R)[0].ravel())
+
+
+def read_side_orientation(tcp):
+    """SIDE_APPROACH_YAW_DEG and SIDE_ROLL_DEG of a jogged pose, as side_rotation() defines
+    them (yaw relative to the radial direction at the TCP), or None if the tool is not
+    roughly horizontal."""
+    R = cv2.Rodrigues(np.asarray(tcp[3:], dtype=float))[0]
+    z = R[:, 2]
+    if abs(z[2]) > np.sin(np.radians(MAX_TILT_DEG)) or np.hypot(tcp[0], tcp[1]) < 0.1:
+        return None
+    z = np.array([z[0], z[1], 0.0]) / np.hypot(z[0], z[1])
+    down = np.array([0.0, 0.0, -1.0])
+    yaw = np.degrees(np.arctan2(z[1], z[0]) - np.arctan2(tcp[1], tcp[0]))
+    roll = np.degrees(np.arctan2(R[:, 0] @ np.cross(z, down), R[:, 0] @ down))
+    return (yaw + 180) % 360 - 180, roll
+
+
+class SidePickPlaceTask(PickPlaceTask):
+    """Like PickPlaceTask, but the cup grabs the glass wall with the tool horizontal."""
+
+    def run(self):
+        # Any start orientation: the side orientation is built from scratch and the
+        # tool only turns back to the start orientation at the end
+        start = self.r.getActualTCPPose()
+        start_rotation = list(start[3:])
+        g = self.glass
+        glass_xy = np.array([g.x, g.y])
+        radius = SIDE_GRIP_RADIUS if SIDE_GRIP_RADIUS is not None else g.diameter / 2
+        if np.linalg.norm(glass_xy) < 0.1:
+            raise TaskFailed("glass is too close to the robot base for a side grip")
+
+        if SIDE_GRIP_ROTATION is not None:
+            # Taught orientation as it is, approach along its tool z axis (may dip a little)
+            self.rotation = list(SIDE_GRIP_ROTATION)
+            approach = cv2.Rodrigues(np.asarray(SIDE_GRIP_ROTATION, dtype=float))[0][:, 2]
+            d = approach[:2] / np.linalg.norm(approach[:2])
+        else:
+            # Radial approach: tilting the tool outwards is a wrist 1 move, far from the
+            # wrist singularity (wrist 2 stays near -90 deg as in HOME_Q)
+            yaw = np.radians(SIDE_APPROACH_YAW_DEG)
+            radial = glass_xy / np.linalg.norm(glass_xy)
+            d = np.array([radial[0] * np.cos(yaw) - radial[1] * np.sin(yaw),
+                          radial[0] * np.sin(yaw) + radial[1] * np.cos(yaw)])
+            approach = np.array([d[0], d[1], 0.0])
+            self.rotation = side_rotation(d, SIDE_ROLL_DEG)
+
+        grip_z = self.table_z + SIDE_GRIP_HEIGHT
+        # The carried glass hangs SIDE_GRIP_HEIGHT below the tip, over glasses rim_height tall
+        carry_z = self.table_z + self.rim_height + SIDE_GRIP_HEIGHT + CARRY_CLEARANCE
+        if carry_z > MAX_TCP_Z:
+            raise TaskFailed(f"carry height {carry_z:.3f} m is above MAX_TCP_Z")
+        safe_z = max(start[2], carry_z)
+        # SIDE_STANDOFF back along the approach from the wall point at grip height
+        wall = np.array([*(glass_xy - d * radius), grip_z])
+        standoff = wall - approach * SIDE_STANDOFF
+        tx, ty = self.place_xy - d * radius      # tip position with the glass axis over the tag
+        print(f"Side pick glass at {g.x * 1000:.0f}, {g.y * 1000:.0f} mm "
+              f"(radius {radius * 1000:.0f} mm), place at "
+              f"{self.place_xy[0] * 1000:.0f}, {self.place_xy[1] * 1000:.0f} mm")
+
+        # Turn the tool horizontal high up, away from the glasses
+        yield from self.move_to([start[0], start[1], safe_z], "up", rotation=start_rotation)
+        yield from self.move_to([start[0], start[1], safe_z], "turn tool sideways")
+        yield from self.move_to([standoff[0], standoff[1], carry_z], "to glass")
+        yield from self.move_to(list(standoff), "down beside glass")
+        self.suction.grip()
+        yield from self.push(approach, SIDE_STANDOFF + SIDE_MAX_PRESS, SIDE_CONTACT_FORCE, "pick")
+        yield from self.wait_for_grip([list(standoff),
+                                       [standoff[0], standoff[1], carry_z]])
+
+        # Carry and place
+        tcp = self.r.getActualTCPPose()
+        yield from self.move_to([tcp[0], tcp[1], carry_z], "lift", holding=True)
+        yield from self.move_to([tx, ty, carry_z], "carry to tag", holding=True)
+        yield from self.move_to([tx, ty, grip_z + APPROACH_GAP], "lower", holding=True)
+        yield from self.push_down(grip_z - MAX_OVERSHOOT, PLACE_FORCE, "place")
+        self.suction.release()
+        yield from self.wait(RELEASE_TIME, "releasing")
+
+        # Back off sideways before going up so the cup does not drag the glass
+        tcp = self.r.getActualTCPPose()
+        away = np.array(tcp[:3]) - approach * SIDE_STANDOFF
+        yield from self.move_to(list(away), "back off")
+        yield from self.move_to([away[0], away[1], carry_z], "up")
+        yield from self.move_to([start[0], start[1], safe_z], "back")
+        yield from self.move_to([start[0], start[1], safe_z], "turn tool back", rotation=start_rotation)
+        yield from self.move_to(start[:3], "back", rotation=start_rotation)
         self.status = "placed"
 
 
@@ -261,8 +425,7 @@ def main():
     fg.setup_window(editor)
 
     suction = connect_suction()
-    r = rtde_receive.RTDEReceiveInterface(IP)
-    c = rtde_control.RTDEControlInterface(IP)
+    r, c = safe_motion.connect(IP)
     gamepad = GamepadControl(GAMEPAD_KEYS)
     jogger = Jogger(c, gamepad)
     print("Connected to robot. TCP pose:", r.getActualTCPPose())
@@ -287,6 +450,12 @@ def main():
                 status = task.status
                 if task.done:
                     task = None
+            # Backstop for moves that got above the ceiling anyway (safe_motion.py)
+            if task is not None and c.over_ceiling():
+                task.abort()
+                task = None
+                status = f"above the {MAX_TCP_Z:.2f} m ceiling, task stopped (jog down)"
+                print(status)
 
             fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2], place_xy)
             if place_xy is not None:
@@ -318,6 +487,17 @@ def main():
                 elif key == "r":
                     suction.release()
                     status = "released"
+                elif key == "o":
+                    pose = r.getActualTCPPose()
+                    rotation = ", ".join(f"{v:.5f}" for v in pose[3:])
+                    print(f"SIDE_GRIP_ROTATION = [{rotation}]\n"
+                          f"SIDE_GRIP_HEIGHT = {pose[2] - finder.table_z:.4f}")
+                    side = read_side_orientation(pose)
+                    if side is None:
+                        status = "o: tool not horizontal, only SIDE_GRIP_ROTATION printed"
+                    else:
+                        status = f"SIDE_APPROACH_YAW_DEG = {side[0]:.0f}  SIDE_ROLL_DEG = {side[1]:.0f}"
+                    print(status)
                 elif key == "h" and task is None:
                     jogger.stop()
                     task = HomeTask(r, c)
@@ -331,8 +511,9 @@ def main():
                     if glass is None:
                         status = "no glass found"
                         continue
-                    task = PickPlaceTask(r, c, suction, glass, place_xy,
-                                         finder.table_z, fg.RIM_HEIGHT)
+                    task_class = SidePickPlaceTask if PICK_FROM_SIDE else PickPlaceTask
+                    task = task_class(r, c, suction, glass, place_xy,
+                                      finder.table_z, fg.RIM_HEIGHT)
     except KeyboardInterrupt:
         pass
     finally:

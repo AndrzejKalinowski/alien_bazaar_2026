@@ -1,4 +1,4 @@
-import rtde_control, rtde_receive
+import safe_motion
 from time import sleep
 from gamepad_jog import GamepadControl, Jogger
 from suction import Suction
@@ -25,8 +25,7 @@ def apply_deadzone(value):
 def connect_rtde():
     while True:
         try:
-            r = rtde_receive.RTDEReceiveInterface(IP)
-            c = rtde_control.RTDEControlInterface(IP)
+            r, c = safe_motion.connect(IP)   # jogging stops under the ceiling
             print("Connected to robot. TCP pose:", r.getActualTCPPose())
             return r, c
         except Exception as e:

@@ -56,11 +56,11 @@ import time
 
 import cv2
 import numpy as np
-import rtde_control
-import rtde_receive
 import math
 
+import safe_motion
 from gamepad_jog import SPEED_ACCEL, GamepadControl
+from safe_motion import CEILING_MARGIN, MAX_TCP_Z   # MAX_TCP_Z is re-exported to the other scripts
 from serial import SerialException
 from suction import Suction
 
@@ -118,9 +118,6 @@ DESCEND_ACCEL = 0.2
 CONTACT_FORCE = 12.0         # N, stop descending above this
 MAX_OVERSHOOT = 0.02         # m, push at most this far past the estimated tag surface
 MIN_TCP_Z = -0.05            # m in base frame, never go lower than this (table guard)
-MAX_TCP_Z = 0.60             # m in base frame, never go higher than this (ceiling guard)
-CEILING_MARGIN = 0.02        # m, stop everything if the TCP ends up this far above MAX_TCP_Z
-CEILING_JOG_GAIN = 2.0       # 1/s, jog Z speed is capped to gain * distance left to the ceiling
 
 GRIP_DWELL = 0.5         # s, let the vacuum build up before lifting
 # s after contact to wait for the controller's "GRIP OK" before giving up.
@@ -502,7 +499,11 @@ class HomeTask:
             self.done = True
             return
         self.status = "going home..."
-        c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL, True)   # asynchronous
+        try:
+            c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL, True)   # asynchronous
+        except safe_motion.MotionRefused as e:
+            self.status = str(e)
+            self.done = True
 
     def update(self, tags, tcp_pose):
         # Give the async move a moment to start before checking if it finished
@@ -585,8 +586,7 @@ def main():
     suction = connect_suction()
     gamepad = GamepadControl(GAMEPAD_KEYS)
 
-    r = rtde_receive.RTDEReceiveInterface(IP)
-    c = rtde_control.RTDEControlInterface(IP)
+    r, c = safe_motion.connect(IP)   # caps upward jogging near the ceiling
     print("Connected to robot. TCP pose:", r.getActualTCPPose())
 
     task = None
@@ -650,8 +650,6 @@ def main():
 
                 jog = gamepad.jog_speed()
                 if jog is not None:
-                    # Slow down upwards motion near the ceiling, only allow down above it
-                    jog[2] = min(jog[2], max(0.0, CEILING_JOG_GAIN * (MAX_TCP_Z - tcp_pose[2])))
                     if task is not None:
                         task.abort()
                         task = None
@@ -670,8 +668,8 @@ def main():
                         task = None
 
                 # Last line of defence for tasks (e.g. a moveJ home arcing upwards).
-                # Jogging is not stopped here: it is already capped above, and
-                # the user has to be able to jog back down.
+                # Jogging is not stopped here: SafeControl.speedL already caps it,
+                # and the user has to be able to jog back down.
                 if task is not None and tcp_pose[2] > MAX_TCP_Z + CEILING_MARGIN:
                     task.abort()
                     task = None
