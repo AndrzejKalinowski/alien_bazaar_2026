@@ -90,19 +90,20 @@ MAX_TILT_DEG = 10            # tool must point down within this at the start
 
 # --- side grip ------------------------------------------------------------------
 PICK_FROM_SIDE = True        # grab the glass wall with the tool horizontal instead of the foot
-SIDE_GRIP_HEIGHT = 0.0394    # m above the table, cup center (TCP) on the wall (taught pose); the gripper must clear the table here
+SIDE_GRIP_HEIGHT = 0.035    # m above the table, cup center (TCP) on the wall (taught pose); the gripper must clear the table here
 SIDE_GRIP_RADIUS = None      # m, glass radius at SIDE_GRIP_HEIGHT, None = measured foot diameter / 2
 # Taught grip orientation, axis-angle in the base frame (o key prints it), used for
-# every glass; the approach runs along its tool z axis (here base -y, 3 deg down).
+# every glass; the approach runs along its tool z axis (here base -y, 0.7 deg down).
 # None = level tool built from SIDE_APPROACH_YAW_DEG / SIDE_ROLL_DEG instead.
-SIDE_GRIP_ROTATION = [1.53266, 0.62846, -0.5963]
-SIDE_APPROACH_YAW_DEG = 4    # deg, turn the approach from radial (base -> glass) around vertical
-SIDE_ROLL_DEG = 45           # deg, tool turned around its own axis: 0 = tool x straight down (o key reads it off)
+SIDE_GRIP_ROTATION = [1.48600, -0.65077, 0.65623]
+SIDE_APPROACH_YAW_DEG = 8    # deg, turn the approach from radial (base -> glass) around vertical
+SIDE_ROLL_DEG = 138          # deg, tool turned around its own axis: 0 = tool x straight down (o key reads it off)
 SIDE_STANDOFF = 0.03         # m, gap between cup and wall before the slow approach and after release
 SIDE_MAX_PRESS = 0.006       # m, go at most this far past the expected wall (camera error, cup compression)
 SIDE_CONTACT_FORCE = 5.0     # N, stop the sideways approach early (a free glass slides before this)
 
 MOVE_SPEED = 0.15            # m/s, moveL
+APPROACH_SPEED = 0.05        # m/s, moveL over to the glass and down next to it / onto the tag
 MOVE_ACCEL = 0.6             # m/s^2 (keep low enough for the vacuum to hold the glass)
 DESCEND_SPEED = 0.015        # m/s, slow final approach
 DESCEND_ACCEL = 0.2
@@ -189,10 +190,10 @@ class PickPlaceTask(Task):
         self.rim_height = rim_height
         super().__init__(r, c)
 
-    def move_to(self, xyz, label, holding=False, rotation=None):
+    def move_to(self, xyz, label, holding=False, rotation=None, speed=MOVE_SPEED):
         xyz = [xyz[0], xyz[1], min(max(xyz[2], MIN_TCP_Z), MAX_TCP_Z)]
         rotation = self.rotation if rotation is None else rotation
-        self.c.moveL(xyz + list(rotation), MOVE_SPEED, MOVE_ACCEL, True)
+        self.c.moveL(xyz + list(rotation), speed, MOVE_ACCEL, True)
         for status in self.wait_move(label):
             if holding and self.suction.grip_result() == "LOST":
                 self.c.stopL(STOP_DECEL)
@@ -264,8 +265,8 @@ class PickPlaceTask(Task):
 
         # Pick
         yield from self.move_to([start[0], start[1], max(start[2], carry_z)], "up")
-        yield from self.move_to([g.x, g.y, carry_z], "to glass")
-        yield from self.move_to([g.x, g.y, foot_z + APPROACH_GAP], "approach glass")
+        yield from self.move_to([g.x, g.y, carry_z], "to glass", speed=APPROACH_SPEED)
+        yield from self.move_to([g.x, g.y, foot_z + APPROACH_GAP], "approach glass", speed=APPROACH_SPEED)
         self.suction.grip()
         yield from self.push_down(foot_z - MAX_OVERSHOOT, CONTACT_FORCE, "pick")
 
@@ -274,7 +275,7 @@ class PickPlaceTask(Task):
         # Carry and place
         yield from self.move_to([g.x, g.y, carry_z], "lift", holding=True)
         yield from self.move_to([tx, ty, carry_z], "carry to tag", holding=True)
-        yield from self.move_to([tx, ty, foot_z + APPROACH_GAP], "lower", holding=True)
+        yield from self.move_to([tx, ty, foot_z + APPROACH_GAP], "lower", holding=True, speed=APPROACH_SPEED)
         yield from self.push_down(foot_z - MAX_OVERSHOOT, PLACE_FORCE, "place")
         self.suction.release()
         yield from self.wait(RELEASE_TIME, "releasing")
@@ -359,8 +360,8 @@ class SidePickPlaceTask(PickPlaceTask):
         # Turn the tool horizontal high up, away from the glasses
         yield from self.move_to([start[0], start[1], safe_z], "up", rotation=start_rotation)
         yield from self.move_to([start[0], start[1], safe_z], "turn tool sideways")
-        yield from self.move_to([standoff[0], standoff[1], carry_z], "to glass")
-        yield from self.move_to(list(standoff), "down beside glass")
+        yield from self.move_to([standoff[0], standoff[1], carry_z], "to glass", speed=APPROACH_SPEED)
+        yield from self.move_to(list(standoff), "down beside glass", speed=APPROACH_SPEED)
         self.suction.grip()
         yield from self.push(approach, SIDE_STANDOFF + SIDE_MAX_PRESS, SIDE_CONTACT_FORCE, "pick")
         yield from self.wait_for_grip([list(standoff),
@@ -370,7 +371,7 @@ class SidePickPlaceTask(PickPlaceTask):
         tcp = self.r.getActualTCPPose()
         yield from self.move_to([tcp[0], tcp[1], carry_z], "lift", holding=True)
         yield from self.move_to([tx, ty, carry_z], "carry to tag", holding=True)
-        yield from self.move_to([tx, ty, grip_z + APPROACH_GAP], "lower", holding=True)
+        yield from self.move_to([tx, ty, grip_z + APPROACH_GAP], "lower", holding=True, speed=APPROACH_SPEED)
         yield from self.push_down(grip_z - MAX_OVERSHOOT, PLACE_FORCE, "place")
         self.suction.release()
         yield from self.wait(RELEASE_TIME, "releasing")
