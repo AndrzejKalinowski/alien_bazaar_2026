@@ -53,7 +53,7 @@ The real bug was that `Suction.grip()` always cleared `_grip_result`, even when 
 [Gripper/README.md](Gripper/README.md) says `HOLD`/`PRESSURE` return `ERR NO_SENSOR` "if … a reading fails". In the code, `NaN` only happens when the sensor is missing at boot. `Adafruit_BMP085::readPressure()` returns an integer and does not report I2C errors. A loose I2C wire during the demo therefore produces garbage pressure, which can trigger a false `GRIP OK` or `GRIP LOST`.
 *Fix:* in `samplePressure()`, treat values outside 300–1100 hPa (the BMP180 range) as `NAN`. Optionally re-probe the chip ID every few seconds.
 
-**7. The rejected-circle overlay goes stale**
+**7. The rejected-circle overlay goes stale** *Fixed on branch `fix/audit`.*
 [find_glasses.py:338](ur5e_experiments/find_glasses.py#L338): `detect()` returns early when `HoughCircles` finds nothing, *before* `self.rejected = []`. The red "rejected" circles from the last frame that had detections stay on screen. This is misleading while tuning the trackbars.
 *Fix:* reset `self.rejected` at the top of `detect()`.
 

@@ -345,6 +345,7 @@ class GlassFinder:
 
     def detect(self, undistorted):
         """Glasses in one undistorted frame."""
+        self.rejected = []   # before the early return, or the last frame's stay on screen
         gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
         gray = cv2.medianBlur(gray, BLUR)
         circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT_ALT, dp=1.5,
@@ -356,7 +357,6 @@ class GlassFinder:
             return []
 
         hsv = cv2.cvtColor(undistorted, cv2.COLOR_BGR2HSV)
-        self.rejected = []
         candidates = []
         for u, v, r in circles.reshape(-1, 3):
             center = pixel_to_plane(self.K, self.T_base_cam, (u, v), self.rim_z)
