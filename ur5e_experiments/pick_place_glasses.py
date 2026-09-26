@@ -44,10 +44,19 @@ Motion watchdog (robot_watchdog.py): the robot stops by itself if the main
 loop sends nothing for 0.2 s (stalled loop, camera hang, breakpoint). The
 next loop iteration then re-uploads the control script and aborts the task.
 
+Faults are recovered in place, without restarting (which would also reset the
+gripper, 2 s): any error in the loop (a robot call failing after a protective
+stop, a lost RTDE connection, no camera frame for FRAME_TIMEOUT) stops all
+motion, aborts the task, prints the traceback and a WARNING, reconnects RTDE
+if needed and carries on. After a protective stop, clear it on the pendant;
+the control script is then re-uploaded by itself. Ctrl+C, q / Esc or closing
+the window still quit.
+
 Requires: pip install opencv-python ur_rtde pyserial
 """
 
 import time
+import traceback
 
 import cv2
 import numpy as np
@@ -84,6 +93,7 @@ SPEED_CMD_TIME = 0.02        # s
 STOP_DECEL = 1.0             # m/s^2
 HOME_SPEED = 1.0
 HOME_ACCEL = 1.0
+RECONNECT_DELAY = 1.0        # s, wait after a failed reconnect before the loop retries
 
 GAMEPAD_KEYS = {"BTN_NORTH": "p", "BTN_SOUTH": "s", "BTN_EAST": "g",
                 "BTN_WEST": "r", "BTN_START": "h"}
@@ -252,6 +262,30 @@ class PickPlaceTask(Task):
         self.status = "placed"
 
 
+def recover(r, c, watchdog):
+    """After an exception in the main loop: stop all motion, reconnect what dropped out.
+
+    The control script itself is re-uploaded by watchdog.kick() on the next
+    frame, once the robot is not protective- or emergency-stopped any more.
+    """
+    for stop in (c.speedStop, c.stopL, c.stopJ):
+        try:
+            stop(STOP_DECEL)
+        except Exception:
+            pass
+    try:
+        if not r.isConnected():
+            print("RTDE receive connection lost, reconnecting")
+            r.reconnect()
+        if not c.isConnected():
+            print("RTDE control connection lost, reconnecting")
+            c.reconnect()
+            watchdog.arm()
+    except Exception as e:
+        print(f"Reconnect failed ({e}), retrying on the next error")
+        time.sleep(RECONNECT_DELAY)
+
+
 def find_place_tag(detector, finder, image):
     """(base x, y of the place tag's center on the table, its id, all ids in view), or None."""
     centers = fg.tag_centers(detector, image)
@@ -308,81 +342,91 @@ def main():
         while True:
             if fg.window_closed():
                 break
-            fg.read_trackbars(finder)
-            image = finder.undistort(fg.read_frame(cap))
-            if not watchdog.kick():
-                if task is not None:
-                    task.abort()
-                    task = None
-                jogger.stop()
-                status = "robot was stopped (loop stall / protective stop), task aborted"
-            glasses = finder.detect(image)
-            seen = find_place_tag(detector, finder, image)
-            if seen is not None:
-                place_xy, place_id, tags_in_view = seen
-            tcp = r.getActualTCPPose()
-
-            if task is not None:
-                task.update()
-                status = task.status
-                if task.done:
-                    task = None
-
-            fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2], place_xy)
-            if place_xy is not None:
-                draw_place(image, finder, place_xy, place_id, seen is not None)
-            cv2.imshow(fg.WINDOW, image)
-
-            if gamepad.jog_speed() is not None and task is not None:
-                task.abort()
-                task = None
-                status = "manual override, task aborted"
-                print(status)
-            if task is None:
-                jogger.update(tcp)
-            # Last line of defence for tasks (e.g. the moveJ home arcing upwards)
-            elif tcp[2] > MAX_TCP_Z + CEILING_MARGIN:
-                task.abort()
-                task = None
-                status = warn(f"above the ceiling ({tcp[2]:.3f} m), task stopped - jog down")
-
-            keys = fg.read_keys(gamepad)
-            if "q" in keys or "\x1b" in keys:
-                break
-            for key in keys:
-                if key == "s":
+            try:
+                fg.read_trackbars(finder)
+                image = finder.undistort(fg.read_frame(cap))
+                if not watchdog.kick():
                     if task is not None:
                         task.abort()
                         task = None
                     jogger.stop()
-                    c.speedStop(STOP_DECEL)
-                    status = "stopped"
-                elif key == "g" and task is not None:
-                    # The pick task controls the vacuum and waits for its GRIP result
-                    status = warn("task running, g ignored (s stops the task)")
-                elif key in ("g", "r"):
-                    status = key_command(suction, key)
-                elif key in ("h", "p") and task is not None:
-                    status = warn(f"task running ({task.status}), {key} ignored (s stops the task)")
-                elif key == "h":
-                    jogger.stop()
-                    task = HomeTask(r, c)
-                elif key == "p":
-                    jogger.stop()
-                    if place_xy is None:
-                        status = warn(f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} "
-                                      "in view, p ignored")
-                        continue
-                    if PLACE_TAG_ID is None and len(tags_in_view) > 1:
-                        # Not refused: the id of the place tag is not fixed, so the lowest wins
-                        warn(f"tags {tags_in_view} in view, placing on the lowest id {place_id}")
-                    status = "measuring..."
-                    glass = choose_glass(finder.measure(cap, kick=watchdog.kick), place_xy)
-                    if glass is None:
-                        status = warn("no glass found, p ignored")
-                        continue
-                    task = PickPlaceTask(r, c, suction, glass, place_xy,
-                                         finder.table_z, GLASS_HEIGHT)
+                    status = "robot was stopped (loop stall / protective stop), task aborted"
+                glasses = finder.detect(image)
+                seen = find_place_tag(detector, finder, image)
+                if seen is not None:
+                    place_xy, place_id, tags_in_view = seen
+                tcp = r.getActualTCPPose()
+
+                if task is not None:
+                    task.update()
+                    status = task.status
+                    if task.done:
+                        task = None
+
+                fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2], place_xy)
+                if place_xy is not None:
+                    draw_place(image, finder, place_xy, place_id, seen is not None)
+                cv2.imshow(fg.WINDOW, image)
+
+                if gamepad.jog_speed() is not None and task is not None:
+                    task.abort()
+                    task = None
+                    status = "manual override, task aborted"
+                    print(status)
+                if task is None:
+                    jogger.update(tcp)
+                # Last line of defence for tasks (e.g. the moveJ home arcing upwards)
+                elif tcp[2] > MAX_TCP_Z + CEILING_MARGIN:
+                    task.abort()
+                    task = None
+                    status = warn(f"above the ceiling ({tcp[2]:.3f} m), task stopped - jog down")
+
+                keys = fg.read_keys(gamepad)
+                if "q" in keys or "\x1b" in keys:
+                    break
+                for key in keys:
+                    if key == "s":
+                        if task is not None:
+                            task.abort()
+                            task = None
+                        jogger.stop()
+                        c.speedStop(STOP_DECEL)
+                        status = "stopped"
+                    elif key == "g" and task is not None:
+                        # The pick task controls the vacuum and waits for its GRIP result
+                        status = warn("task running, g ignored (s stops the task)")
+                    elif key in ("g", "r"):
+                        status = key_command(suction, key)
+                    elif key in ("h", "p") and task is not None:
+                        status = warn(f"task running ({task.status}), {key} ignored (s stops the task)")
+                    elif key == "h":
+                        jogger.stop()
+                        task = HomeTask(r, c)
+                    elif key == "p":
+                        jogger.stop()
+                        if place_xy is None:
+                            status = warn(f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} "
+                                          "in view, p ignored")
+                            continue
+                        if PLACE_TAG_ID is None and len(tags_in_view) > 1:
+                            # Not refused: the id of the place tag is not fixed, so the lowest wins
+                            warn(f"tags {tags_in_view} in view, placing on the lowest id {place_id}")
+                        status = "measuring..."
+                        glass = choose_glass(finder.measure(cap, kick=watchdog.kick), place_xy)
+                        if glass is None:
+                            status = warn("no glass found, p ignored")
+                            continue
+                        task = PickPlaceTask(r, c, suction, glass, place_xy,
+                                             finder.table_z, GLASS_HEIGHT)
+            except Exception as e:
+                # Robot fault, lost connection, camera hiccup...: stop and recover in
+                # place. Restarting would also cost the gripper's 2 s serial reset.
+                traceback.print_exc()
+                status = warn(f"error: {e} - stopped, recovering")
+                task = None
+                recover(r, c, watchdog)
+                if cv2.waitKey(1) & 0xFF in (ord("q"), 27):   # keep the window alive, allow quit
+                    break
     except KeyboardInterrupt:
         pass
     finally:

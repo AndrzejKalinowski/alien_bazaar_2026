@@ -75,7 +75,7 @@ In `find_glasses.py` it is the height of the circle seen for *upright* glasses. 
 **12. `bus_servos.py` docs contradict the servo ID constants** *Fixed on branch `fix/audit`: docs follow the constants (rotator 2, sprayer 1).*
 The constants are `ROTATOR_ID = 2` and `SPRAYER_ID = 1`, but the docstring says "give the sprayer its own ID first: `set-id 1 2`" and the usage example builds `rotator = BusServo(bus, 1)`, `sprayer = … BusServo(bus, 2)`. Following the docstring gives the servos the wrong roles.
 
-**13. `pick_place_glasses.py` has no recovery after a robot fault**
+**13. `pick_place_glasses.py` has no recovery after a robot fault** *Fixed on branch `fix/audit`: the loop body is wrapped in `try/except`; `recover()` stops all motion and reconnects RTDE, and `RobotWatchdog.kick()` (#2) re-uploads the control script once the protective stop is cleared. Not tested on the robot or URSim.*
 `follow_april_tag.py` catches exceptions from robot calls, stops, and calls `reuploadScript()`. `pick_place_glasses.py` lets any RTDE exception (e.g. after a protective stop) end the program. During a live demo, recovering in place is much faster than restarting the script and waiting for the gripper's 2 s serial reset.
 
 ### Low

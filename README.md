@@ -274,6 +274,8 @@ The tool keeps the orientation it had at the start, which **must be within 10° 
 
 Without the gripper connected, the script prints a warning and uses `NoSuction`. The motion runs and "grip" is assumed successful. This is handy for dry runs.
 
+**Faults are recovered in place.** An error in the loop (a robot call failing after a protective stop, a lost RTDE connection, no camera frame for 0.5 s) stops all motion, aborts the task and shows a `WARNING`; the script keeps running. After a protective stop, clear it on the pendant: the control script is re-uploaded by itself. No restart, so no 2 s gripper reset either.
+
 ### 7.2 `find_glasses.py`: detection only / calibration
 
 ```powershell
@@ -438,7 +440,7 @@ These are software guards, **not** a replacement for the UR safety configuration
 | Jog Z limit | `Z_LIMIT_GAIN` = 2 /s | `gamepad_jog.py` (`Jogger`, `limit_z_speed`), used by every script | Z jog speed ≤ gain × distance to the limit: slowdown starts 4 cm before it. Beyond a limit only the way back is allowed |
 | `MAX_OVERSHOOT` | 20 mm / 15 mm | tag picker / glass pick-place | The farthest a force-guarded push may go past the expected surface |
 | `CONTACT_FORCE` / `PLACE_FORCE` | 12 N / 10 N / 8 N | tag pick / glass pick / glass place | Descent stops above this force |
-| `CAMERA_TIMEOUT` / `FRAME_TIMEOUT` | 0.5 s | `follow_april_tag.py` / `find_glasses.py` | No new frame → `speedStop` / error (the `finally` stops the robot) |
+| `CAMERA_TIMEOUT` / `FRAME_TIMEOUT` | 0.5 s | `follow_april_tag.py` / `find_glasses.py` | No new frame → `speedStop` / error. `pick_place_glasses` then stops the robot and keeps running (recovers in place); `find_glasses` ends and its `finally` stops the robot |
 | `WATCHDOG_MIN_FREQUENCY` | 5 Hz | `robot_watchdog.py`, used by `pick_place_glasses`, `find_glasses`, `follow_april_tag`, `gamepad_robot_teleop` | The controller stops the control script if no RTDE input arrives for 0.2 s. The next loop iteration re-uploads it and aborts the task |
 | Manual override | – | all task-based scripts | Any stick input aborts the running task |
 | `speedL` time | 0.02 s | everywhere | Never 0. With `time=0` the control script spins and the robot protective-stops with **C271A1** |
