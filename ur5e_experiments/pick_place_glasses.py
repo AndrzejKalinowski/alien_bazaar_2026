@@ -11,8 +11,11 @@ separate from find_glasses.RIM_HEIGHT, so tuning one script can't break the othe
 Sequence (p / gamepad Y):
   1. Measure the glasses and the place tag (averaged over several frames; the
      robot should not block the camera's view of them).
-  2. Pick the glass closest to the tag (glasses already standing on the tag
-     are skipped).
+  2. Pick the glass closest to the tag. Skipped (printed): glasses already
+     standing on the tag, and in diff mode glasses with an unclear orientation
+     ("?"), upright glasses when gripping from the top (the cup can't hold an
+     open end; with PICK_FROM_SIDE both orientations are picked), and glasses
+     with an obstruction (arm, hand) within OBSTRUCTION_CLEARANCE of the wall.
   3. Up to CARRY_Z, over the glass, down to APPROACH_GAP above the foot, vacuum
      on, slowly down until the force sensor feels contact, wait for "GRIP OK".
   4. Up to CARRY_Z, over the tag, down to APPROACH_GAP above the placing
@@ -45,9 +48,20 @@ SIDE_GRIP_HEIGHT above the table instead of the foot on top.
   SIDE_ROLL_DEG (the turn around the tool's own axis: 0 = tool x axis pointing
   straight down, positive = right-hand around the approach direction); o
   prints those too when the tool is roughly level.
-  The wall radius at the grip height is SIDE_GRIP_RADIUS, or half the measured
-  foot diameter for straight-sided glasses. The approach path is not checked:
-  the gripper must fit between the glasses on the robot side of the target.
+  The wall radius at the grip height comes from the glass shape (GLASS_HEIGHT,
+  GLASS_MOUTH_DIAMETER, GLASS_FOOT_DIAMETER) and the orientation found in diff
+  mode: upside down the wide mouth is at the bottom, upright the narrow foot.
+  In classic mode it is SIDE_GRIP_RADIUS, or half the measured foot diameter
+  for straight-sided glasses. The approach path is not checked: the gripper
+  must fit between the glasses on the robot side of the target.
+
+Diff mode (find_glasses.py, table_background.py, glass_classifier.py): with
+the table empty and the robot out of view press b once; from then on glasses
+are found only where the table differs from the empty one, and are told
+apart as upright (UP, blue) / upside down (DOWN, green) / unclear ("?",
+orange). p refuses while the background is STALE (red text: the camera
+moved or the light changed a lot; clear the table and press b again). d
+switches back to the classic detection, v shows the change mask.
 
 Keys (video window) / gamepad:
   p  / Y (north)   pick & place one glass
@@ -56,11 +70,15 @@ Keys (video window) / gamepad:
   r  / X (west)    release
   h  / Start       go home (HOME_Q from follow_april_tag.py, tool pointing down)
   o                print the side grip constants of the current tool pose
+  b                capture the empty table (diff mode, ~1 s; not while a task runs)
+  d                switch diff / classic detection
+  v                show / hide the change mask
   q / Esc          quit
   Sticks jog the robot (gamepad_jog.py); touching them aborts a running task.
   The mouse edits the detection area as in find_glasses.py.
   A command that can't run right now (g during the 1.5 s release pulse or
-  while a task runs, p / h while a task runs, ...) is refused with a WARNING
+  while a task runs, p / h / b while a task runs, p with no pickable glass or
+  a stale background, ...) is refused with a WARNING
   in the console and the window; the program keeps running.
 
 All motion goes through safe_motion.py: the TCP never goes above MAX_TCP_Z
@@ -94,6 +112,7 @@ import cv2
 import numpy as np
 
 import find_glasses as fg
+import glass_classifier as gc
 import safe_motion
 from follow_april_tag import HOME_Q, IP, MAX_TCP_Z, MIN_TCP_Z, connect_suction
 from gamepad_jog import GamepadControl, Jogger
@@ -105,6 +124,11 @@ from suction import key_command
 PLACE_TAG_ID = None          # None = the lowest id in view
 PLACED_RADIUS = 0.04         # m, a glass this close to the tag already stands on it
 GLASS_HEIGHT = 0.075         # m, upside-down glass: table to top of the foot (seen circle, cup lands here)
+# Diff mode: the glass is a truncated cone (measure yours; the classifier and the
+# side grip radius depend on them)
+GLASS_MOUTH_DIAMETER = 0.080  # m, open end
+GLASS_FOOT_DIAMETER = 0.060   # m, closed end
+OBSTRUCTION_CLEARANCE = 0.05  # m, an obstruction (arm, hand) closer than this to a glass wall blocks picking it
 
 CARRY_CLEARANCE = 0.05       # m, gap under the carried glass over the other glasses
 APPROACH_GAP = 0.02          # m, stop this far above the foot / placing height, then go slowly
@@ -114,7 +138,8 @@ MAX_TILT_DEG = 10            # tool must point down within this at the start
 # --- side grip ------------------------------------------------------------------
 PICK_FROM_SIDE = True        # grab the glass wall with the tool horizontal instead of the foot
 SIDE_GRIP_HEIGHT = 0.035    # m above the table, cup center (TCP) on the wall (taught pose); the gripper must clear the table here
-SIDE_GRIP_RADIUS = None      # m, glass radius at SIDE_GRIP_HEIGHT, None = measured foot diameter / 2
+SIDE_GRIP_RADIUS = None      # m, classic mode: glass radius at SIDE_GRIP_HEIGHT, None = measured foot diameter / 2
+                             # (diff mode: from the glass shape and its orientation)
 # Taught grip orientation, axis-angle in the base frame (o key prints it), used for
 # every glass; the approach runs along its tool z axis (here base -y, 0.7 deg down).
 # None = level tool built from SIDE_APPROACH_YAW_DEG / SIDE_ROLL_DEG instead.
@@ -388,7 +413,7 @@ class SidePickPlaceTask(PickPlaceTask):
         start_rotation = list(start[3:])
         g = self.glass
         glass_xy = np.array([g.x, g.y])
-        radius = SIDE_GRIP_RADIUS if SIDE_GRIP_RADIUS is not None else g.diameter / 2
+        radius = wall_radius(g)
         if np.linalg.norm(glass_xy) < 0.1:
             raise TaskFailed("glass is too close to the robot base for a side grip")
 
@@ -417,7 +442,7 @@ class SidePickPlaceTask(PickPlaceTask):
         wall = np.array([*(glass_xy - d * radius), grip_z])
         standoff = wall - approach * SIDE_STANDOFF
         tx, ty = self.place_xy - d * radius      # tip position with the glass axis over the tag
-        print(f"Side pick glass at {g.x * 1000:.0f}, {g.y * 1000:.0f} mm "
+        print(f"Side pick {g.orientation or ''} glass at {g.x * 1000:.0f}, {g.y * 1000:.0f} mm "
               f"(radius {radius * 1000:.0f} mm), place at "
               f"{self.place_xy[0] * 1000:.0f}, {self.place_xy[1] * 1000:.0f} mm")
 
@@ -464,11 +489,42 @@ def find_place_tag(detector, finder, image):
     return None
 
 
-def choose_glass(glasses, place_xy):
+GLASS_SHAPE = gc.GlassShape(GLASS_HEIGHT, GLASS_MOUTH_DIAMETER, GLASS_FOOT_DIAMETER)
+
+
+def wall_radius(glass, grip_height=SIDE_GRIP_HEIGHT):
+    """m, glass wall radius at the side grip height: from the shape when the orientation
+    is known (the wide end is at the bottom when upside down), else as measured."""
+    if glass.orientation in (gc.UP, gc.DOWN):
+        return GLASS_SHAPE.radius_at(glass.orientation, grip_height)
+    return SIDE_GRIP_RADIUS if SIDE_GRIP_RADIUS is not None else glass.diameter / 2
+
+
+def pickable(glass, objects, from_side=PICK_FROM_SIDE):
+    """None if the glass can be picked, else why not."""
+    if glass.orientation == gc.UNSURE:
+        return "orientation unclear"
+    if glass.orientation == gc.UP and not from_side:
+        return "standing upright, the cup can't grip its open top (PICK_FROM_SIDE)"
+    reach = max(GLASS_MOUTH_DIAMETER, glass.diameter) / 2 + OBSTRUCTION_CLEARANCE
+    if gc.near((glass.x, glass.y), objects, reach):
+        return "obstruction next to it"
+    return None
+
+
+def choose_glass(glasses, place_xy, objects=(), from_side=PICK_FROM_SIDE):
+    """(glass closest to the tag that can be picked, or None; why the others are skipped)."""
     free = [g for g in glasses if np.hypot(g.x - place_xy[0], g.y - place_xy[1]) > PLACED_RADIUS]
-    if len(free) < len(glasses):
-        print("(skipping the glass already standing on the tag)")
-    return min(free, key=lambda g: np.hypot(g.x - place_xy[0], g.y - place_xy[1]), default=None)
+    skipped = ["already on the tag"] if len(free) < len(glasses) else []
+    candidates = []
+    for g in free:
+        reason = pickable(g, objects, from_side)
+        if reason:
+            skipped.append(f"{g.x * 1000:.0f}, {g.y * 1000:.0f} mm: {reason}")
+        else:
+            candidates.append(g)
+    glass = min(candidates, key=lambda g: np.hypot(g.x - place_xy[0], g.y - place_xy[1]), default=None)
+    return glass, skipped
 
 
 def draw_place(image, finder, place_xy, tag_id, seen):
@@ -486,7 +542,8 @@ def draw_place(image, finder, place_xy, tag_id, seen):
 
 def main():
     cap, width, height = fg.open_camera()
-    finder = fg.GlassFinder.load(width, height, rim_height=GLASS_HEIGHT)
+    finder = fg.GlassFinder.load(width, height, rim_height=GLASS_HEIGHT,
+                                 mouth_diameter=GLASS_MOUTH_DIAMETER, foot_diameter=GLASS_FOOT_DIAMETER)
     detector = fg.make_tag_detector()
     editor = fg.AreaEditor(finder)
     fg.setup_window(editor)
@@ -501,7 +558,7 @@ def main():
     place_xy = None
     place_id = None
     tags_in_view = []
-    status = "p: pick & place  s: stop  g/r: grip/release  h: home  q: quit"
+    status = "p: pick & place  s: stop  g/r: grip/release  h: home  b: empty table  d: mode  q: quit"
     watchdog = RobotWatchdog(c)
     try:
         while True:
@@ -573,8 +630,12 @@ def main():
                         else:
                             status = f"SIDE_APPROACH_YAW_DEG = {side[0]:.0f}  SIDE_ROLL_DEG = {side[1]:.0f}"
                         print(status)
-                    elif key in ("h", "p") and task is not None:
+                    elif key in ("h", "p", "b") and task is not None:
                         status = warn(f"task running ({task.status}), {key} ignored (s stops the task)")
+                    elif key in fg.DIFF_KEYS:
+                        if key == "b":
+                            jogger.stop()   # b blocks the loop for ~1 s (kicking the watchdog)
+                        status = fg.diff_key(finder, key, cap, kick=watchdog.kick)
                     elif key == "h":
                         jogger.stop()
                         task = HomeTask(r, c)
@@ -588,9 +649,16 @@ def main():
                             # Not refused: the id of the place tag is not fixed, so the lowest wins
                             warn(f"tags {tags_in_view} in view, placing on the lowest id {place_id}")
                         status = "measuring..."
-                        glass = choose_glass(finder.measure(cap, kick=watchdog.kick), place_xy)
+                        measured = finder.measure(cap, kick=watchdog.kick)
+                        if finder.mode == fg.DIFF and finder.change is not None and finder.change.stale:
+                            status = warn("table background stale, p ignored (clear the table, b)")
+                            continue
+                        glass, skipped = choose_glass(measured, place_xy, finder.objects)
+                        for reason in skipped:
+                            print(f"  skipping glass: {reason}")
                         if glass is None:
-                            status = warn("no glass found, p ignored")
+                            status = warn("no glass that can be picked" + (f" ({skipped[0]})" if skipped else "")
+                                          + ", p ignored")
                             continue
                         task_class = SidePickPlaceTask if PICK_FROM_SIDE else PickPlaceTask
                         task = task_class(r, c, suction, glass, place_xy,
