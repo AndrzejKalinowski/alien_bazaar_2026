@@ -164,7 +164,16 @@ wsl -- sudo docker run --rm -it --name ursim -p 5900:5900 -p 6080:6080 -p 29999:
 
 Pendant in the browser: http://localhost:6080/vnc.html. Point the scripts at `127.0.0.1` (change `IP`, see [§14](#14-where-to-change-settings)). The simulated robot has no real force sensor, so force-based contact detection falls back to the max-depth limits.
 
-### 4.4 Gripper firmware
+### 4.4 Offline tests
+
+```powershell
+pip install pytest pyflakes
+python -m pytest ur5e_experiments/tests hoverboard_experiments/tests
+```
+
+No robot, gripper, camera or gamepad needed; takes about a second. They check the geometry (frames, back-projection, camera pose, hand-eye solver), the jog Z limits, the motion watchdog and the suction driver against fakes, the servo packets, the hoverboard framing against the protocol's reference client, and (with pyflakes) every script for undefined names, the kind of bug that crashed `gamepad_robot_teleop.py` (AUDIT #1). Run them before a demo and after every change.
+
+### 4.5 Gripper firmware
 
 Open `Gripper/` in VS Code with the PlatformIO extension, then **Build** and **Upload**. Or run `pio run -t upload` in `Gripper/`. Details are in [Gripper/README.md](Gripper/README.md).
 

@@ -104,7 +104,7 @@ The constants are `ROTATOR_ID = 2` and `SPRAYER_ID = 1`, but the docstring says 
 
 **23. Docs out of date.** *Fixed on branch `fix/audit`: typo fixed, brief moved to `docs/brief.md` (links updated).* The old root README said "gripper RobotiQ". The actual gripper is the custom suction cup (fixed in the new README). `ur5e_experiments/README.md` has the typo "ue5 docs". The brief's file name `alien-bazaar-2026-brief (1).md` contains a space and "(1)", which is awkward to link or type. Consider renaming it to `docs/brief.md`.
 
-**24. No automated tests.** Several pieces are pure functions and easy to test offline:
+**24. No automated tests.** *Fixed on branch `fix/audit`: 57 pytest tests (`ur5e_experiments/tests`, `hoverboard_experiments/tests`), about 2 s, all the items below plus the watchdog, jog Z limits, the #3 grip session and a pyflakes undefined-name check over every script (it flags #1 when reintroduced). `bipropellant_serial` matches the reference client byte for byte.* Several pieces are pure functions and easy to test offline:
 - `pixel_to_plane`, `tag_centers`, `solve_camera_pose` (synthetic camera);
 - `rotvec_between` / `rotation_error`;
 - `park_martin` (synthetic AX = XB with a known X);

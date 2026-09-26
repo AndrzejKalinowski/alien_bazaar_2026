@@ -39,12 +39,15 @@ pip install ur_rtde==1.6.5 opencv-python==5.0.0.93 numpy pyserial cobs inputs py
 # Offline syntax check of everything
 python -m compileall -q -x "\.venv" ur5e_experiments hoverboard_experiments
 
+# Offline tests (no hardware; about a second). pip install pytest pyflakes
+python -m pytest ur5e_experiments/tests hoverboard_experiments/tests
+
 # Firmware (from Gripper/)
 pio run                 # build
 pio run -t upload       # flash (user only)
 ```
 
-There are no tests yet. For robot logic without hardware, URSim can run in Docker/WSL (see [ur5e_experiments/README.md](ur5e_experiments/README.md)); point `IP` at `127.0.0.1`.
+The tests (`ur5e_experiments/tests`, `hoverboard_experiments/tests`) cover the pure functions (geometry, hand-eye, Z limits, packets, framing) and the drivers against fakes (suction controller, RTDE watchdog); `conftest.py` stubs `ur_rtde` and the gamepad libraries, and `test_static.py` runs pyflakes for undefined names over every script. Add a test with each fix. For robot logic without hardware, URSim can run in Docker/WSL (see [ur5e_experiments/README.md](ur5e_experiments/README.md)); point `IP` at `127.0.0.1`.
 
 ## Conventions (match these)
 
