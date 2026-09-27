@@ -115,7 +115,7 @@ stanowisk i tagów odbioru. Szklanki muszą stać otworem do góry.
 potok wysyła tylko gotowe pomiary i podgląd JPEG, więc przetwarzanie obrazu
 nie konkuruje z pętlą sterowania o GIL. Błąd otwarcia kamery przerywa start
 programu. Gdy proces kamery zginie, pomiar się zestarzeje, a nadzorca
-zatrzyma partię. Kamera Z klatek w oknie 0,3 s
+zatrzyma partię. Z klatek w oknie 0,3 s
 tworzy jeden pomiar: szklanka musi być wykryta w co najmniej połowie
 klatek okna. Mniej niż 5 klatek w oknie nie daje pomiaru; obraz staje się
 nieaktualny, a nadzorca zatrzymuje partię. Dzięki temu trzy kolejne pomiary
