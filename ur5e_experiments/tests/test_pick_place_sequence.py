@@ -48,6 +48,8 @@ def untaught_arm_configuration(monkeypatch):
     # The fake robot's joints are no real arm: its self-collision gap is meaningless
     # (tested separately with the real joints below)
     monkeypatch.setattr(ppg, "self_gap", lambda q, T_flange_tcp: 0.05)
+    # No zones from the real cell (the zone tests set their own)
+    monkeypatch.setattr(ppg, "EXCLUSION_ZONES", [])
 
 
 @pytest.fixture
@@ -97,13 +99,31 @@ class FakeSprayer:
         self.stop_requests += 1
 
 
-def make_task(sequence, lose_on_flip=False, sprayer=None):
+class FakeSponge:
+    """bus_servos.BusServo in wheel mode."""
+
+    def __init__(self, error=None):
+        self.speeds = []
+        self.stops = 0
+        self.error = error
+
+    def spin(self, speed, acceleration=None):
+        if self.error is not None:
+            raise self.error
+        self.speeds.append(speed)
+
+    def stop(self):
+        self.stops += 1
+
+
+def make_task(sequence, lose_on_flip=False, sprayer=None, sponge=None):
     robot = FakeRobot(pose=(0.3, -0.3, 0.3, *DOWN))
     suction = FakeSuction(robot, lose_on_flip)
     glass = SimpleNamespace(x=0.35, y=-0.45, diameter=0.07)
     task = ppg.SequenceTask(robot, SafeControl(robot, robot), suction, glass,
                             place_xy=(0.1, -0.5), table_z=0.0, glass_height=0.075,
-                            sequence=sequence, sprayer=FakeSprayer() if sprayer is None else sprayer)
+                            sequence=sequence, sprayer=FakeSprayer() if sprayer is None else sprayer,
+                            sponge=FakeSponge() if sponge is None else sponge)
     return task, robot, suction
 
 
@@ -147,14 +167,17 @@ def test_flip_sequence_regrips_from_the_top_and_places_on_the_tag(clock):
     # then the stations: sprayer, dryer (entry, DRY_SWINGS x right-left, middle), back to
     # the joints before the sprayer, and the last turn back to the start orientation
     dry_q5 = ppg.DRY_Q[5]
-    swing = ppg.DRY_FIRST_DIRECTION * np.radians(ppg.DRY_ANGLE_DEG)
+    turns = [pytest.approx(dry_q5 + np.radians(a)) for a in ppg.DRY_TURNS_DEG]
+    # (from station to station directly: the checks pass here)
     assert wrist[3] == pytest.approx(ppg.SPRAY_Q[5])
-    assert wrist[4] == pytest.approx(dry_q5)
-    assert wrist[5:5 + 2 * ppg.DRY_SWINGS] == [pytest.approx(dry_q5 + swing), pytest.approx(dry_q5 - swing)] * ppg.DRY_SWINGS
-    assert wrist[5 + 2 * ppg.DRY_SWINGS:] == [pytest.approx(dry_q5), pytest.approx(q5), pytest.approx(q5)]
-    assert len(robot.ik_calls) == 5
+    assert wrist[4] == pytest.approx(ppg.SPONGE_Q[5])
+    assert wrist[5] == pytest.approx(dry_q5)
+    assert wrist[6:6 + len(turns)] == turns
+    assert wrist[6 + len(turns):] == [pytest.approx(q5), pytest.approx(q5)]
+    assert len(robot.ik_calls) == 6
+    assert task.sponge.speeds == [ppg.SPONGE_SPEED, -ppg.SPONGE_SPEED] and task.sponge.stops == 1
     assert task.sprayer.started == [ppg.SPRAY_STROKES] and task.sprayer.stop_requests == 1
-    turn_anchors = [qnear for i, (qnear, *_) in enumerate(robot.ik_calls) if i not in (2, 3)]   # stations
+    turn_anchors = [qnear for i, (qnear, *_) in enumerate(robot.ik_calls) if i not in (2, 3, 4)]   # stations
     assert all(qnear == pytest.approx(start_q, abs=1e-4) for qnear in turn_anchors)
     assert all(None not in errors for _, *errors in robot.ik_calls)
     assert all(call[1][2] <= MAX_TCP_Z for call in robot.calls if call[0] == "moveL")
@@ -233,8 +256,8 @@ def test_turns_use_the_taught_arm_configuration(clock, monkeypatch):
     # turn sideways, configuration check before going down, the same for the top grip,
     # spray, dry, back to the start orientation
     anchors = [list(qnear) for qnear, *_ in robot.ik_calls]
-    assert len(anchors) == 7
-    assert [anchors[i] for i in (0, 1, 2, 3, 6)] == [pytest.approx(side_q), pytest.approx(side_q),
+    assert len(anchors) == 8
+    assert [anchors[i] for i in (0, 1, 2, 3, 7)] == [pytest.approx(side_q), pytest.approx(side_q),
                                                       pytest.approx(top_q), pytest.approx(top_q),
                                                       pytest.approx(start_q)]
     # The spray pose: SPRAY_Q shifted by whole turns only
@@ -327,11 +350,11 @@ def test_spray_holds_the_taught_pose(clock):
 REAL_TCP = ppg.system_arm.pose_matrix([0, 0, 0.0766, 0, 0, 0])       # measured on the robot
 WOUND = np.radians([-61.6, -91.0, -133.9, 222.9, 296.7, 47.1])        # read from the robot
 real_self_gap = ppg.self_gap                  # taken at import, before the fixture swaps it
-TAUGHT_Q = (ppg.SIDE_GRIP_Q, ppg.TOP_GRIP_Q, ppg.SPRAY_Q)     # likewise
+TAUGHT_Q = (ppg.SIDE_GRIP_Q, ppg.TOP_GRIP_Q, ppg.SPRAY_Q, ppg.DRY_Q)     # likewise
 
 
 NOW = np.radians([-126.8, -98.3, -92.1, 80.4, 335.2, -13.1])         # read later: wrist 2 wound
-TAUGHT_GAP = min(real_self_gap(q, REAL_TCP) for q in TAUGHT_Q) - ppg.SELF_GAP_MARGIN
+TAUGHT_GAP = min(ppg.SELF_GAP_PROVEN, *(real_self_gap(q, REAL_TCP) for q in TAUGHT_Q)) - ppg.SELF_GAP_MARGIN
 
 
 def plan(q):
@@ -388,28 +411,69 @@ def test_going_down_in_the_wrong_configuration_is_refused(clock, monkeypatch):
 
 
 
-def test_dry_comes_in_along_the_tool_axis_and_swings_about_it(clock):
+def test_dry_comes_in_along_the_tool_axis_and_turns_about_it(clock):
     task, robot, suction = make_task(["pick_top", "dry", "place"])
     assert run(task, robot, clock) == "done"
     tool_z = cv2.Rodrigues(np.asarray(ppg.DRY_POSE[3:]))[0][:, 2]
-    entry = np.subtract(ppg.DRY_POSE[:3], ppg.DRY_APPROACH * tool_z)
+    deeper = np.add(ppg.DRY_POSE[:3], ppg.DRY_DEPTH * tool_z)       # DRY_DEPTH along the tool z axis
+    entry = deeper - ppg.DRY_APPROACH * tool_z
     # joint move to the entry (the fake IK hands out that pose), straight in, straight out
     assert list(robot.ik_poses.values())[1][:3] == pytest.approx(list(entry))
-    into = [call[1] for call in robot.calls if call[0] == "moveL" and call[1][:3] == pytest.approx(ppg.DRY_POSE[:3])]
+    into = [call[1] for call in robot.calls if call[0] == "moveL" and call[1][:3] == pytest.approx(list(deeper))]
     assert len(into) == 1 and into[0][3:] == pytest.approx(ppg.DRY_POSE[3:])
-    # the swings only turn wrist 3
-    swings = [call[1] for call in robot.calls if call[0] == "moveJ"][2:2 + 2 * ppg.DRY_SWINGS]
-    assert all(q[:5] == pytest.approx(swings[0][:5]) for q in swings)
+    # the turns only turn wrist 3: +180 deg from DRY_Q's own angle (never a turn wound)
+    moves = [call[1] for call in robot.calls if call[0] == "moveJ"]
+    entry_q, turned = moves[1], moves[2:2 + len(ppg.DRY_TURNS_DEG)]
+    assert entry_q[5] == pytest.approx(ppg.DRY_Q[5])
+    assert [q[5] for q in turned] == [pytest.approx(ppg.DRY_Q[5] + np.radians(a)) for a in ppg.DRY_TURNS_DEG]
+    assert all(q[:5] == pytest.approx(entry_q[:5]) for q in turned)
+    assert ppg.joint_near_limit(turned[-1]) is None
     assert suction.calls == ["grip", "release"]
 
 
-def test_stations_chain_and_return_once(clock):
+def test_stations_go_direct_when_the_checks_pass(clock):
     task, robot, suction = make_task(["pick_top", "spray", "dry", "place"])
     assert run(task, robot, clock) == "done"
-    # after the pick: sprayer, dryer, ... one move back to the joints before the sprayer
-    back = [call[1] for call in robot.calls if call[0] == "moveJ"]
-    returns = [q for q in back if q == pytest.approx(back[0])]
-    assert len(returns) == 2        # the turn down itself, and the one return before placing
+    moves = [call[1] for call in robot.calls if call[0] == "moveJ"]
+    lifted = moves[0]
+    returns = [i for i, q in enumerate(moves) if q == pytest.approx(lifted)]
+    assert len(returns) == 2        # the turn down itself, and only before placing
+    assert moves[1][5] == pytest.approx(ppg.SPRAY_Q[5]) and moves[2][5] == pytest.approx(ppg.DRY_Q[5])
+
+
+def test_stations_go_through_the_lifted_joints_when_the_direct_move_is_refused(clock):
+    # the direct sprayer -> dryer move swung the gripper into the arm (model)
+    task, robot, suction = make_task(["pick_top", "spray", "dry", "place"])
+    plan = task.station_plan
+
+    def refuse_direct(entry, q_ref, name, keep_turns=False):
+        if name == "drying" and task.station_return_q is not None and not refuse_direct.refused:
+            refuse_direct.refused = True
+            raise ppg.TaskFailed("drying: too close to the arm")
+        return plan(entry, q_ref, name, keep_turns)
+
+    refuse_direct.refused = False
+    task.station_plan = refuse_direct
+    assert run(task, robot, clock) == "done"
+    moves = [call[1] for call in robot.calls if call[0] == "moveJ"]
+    lifted = moves[0]
+    returns = [i for i, q in enumerate(moves) if q == pytest.approx(lifted)]
+    assert len(returns) == 3        # the turn down itself, between the stations, before placing
+    assert moves[returns[1] + 1][5] == pytest.approx(ppg.DRY_Q[5])     # next: the dryer
+
+
+def test_tools_turn_where_they_are(clock, monkeypatch):
+    task, robot, suction = make_task(["pick_side", "place"])
+    assert run(task, robot, clock) == "done"
+    # no move back over the start position before the side turn: the first moveJ
+    # (the turn) starts where the tool went up, over the start of the task
+    first_turn = next(i for i, call in enumerate(robot.calls) if call[0] == "moveJ")
+    before = [call[1] for call in robot.calls[:first_turn] if call[0] == "moveL"]
+    assert before and all(p[:2] == pytest.approx([0.3, -0.3]) for p in before)
+    # the old way still works
+    monkeypatch.setattr(ppg, "TURN_OVER_START", True)
+    task, robot, suction = make_task(["pick_side", "place"])
+    assert run(task, robot, clock) == "done"
 
 
 
@@ -464,3 +528,181 @@ def test_the_next_command_waits_for_the_move_thread_to_exit(clock):
         clock[0] += DT
         robot.advance(DT)
     assert clock[0] - finished_at >= ppg.MOVE_SETTLE
+
+
+def test_spray_button_starts_and_stops_a_burst(capsys):
+    sprayer = FakeSprayer(polls=100)
+    assert "no sprayer" in ppg.spray_command(None, None)
+    assert "task running" in ppg.spray_command(sprayer, task=object())
+    assert sprayer.started == []
+    assert "spraying" in ppg.spray_command(sprayer, None)
+    assert sprayer.started == [ppg.MANUAL_SPRAY_STROKES]
+    assert "stopping" in ppg.spray_command(sprayer, None)       # pressed again while spraying
+    assert sprayer.stop_requests == 1 and sprayer.started == [ppg.MANUAL_SPRAY_STROKES]
+
+
+def test_the_task_spray_waits_for_a_manual_burst(clock):
+    sprayer = FakeSprayer()
+    task, robot, suction = make_task(["pick_top", "spray", "place"], sprayer=sprayer)
+    sprayer.start(count=ppg.MANUAL_SPRAY_STROKES)                  # y pressed just before p
+    assert run(task, robot, clock) == "done"
+    assert sprayer.started == [ppg.MANUAL_SPRAY_STROKES, ppg.SPRAY_STROKES]
+
+
+def test_routes_to_the_taught_stations_stay_clear():
+    # Real UR5e model, real TCP: lifted top grip -> each station entry and back
+    A = ppg.system_arm
+    carry = 0.006 + 0.075 + ppg.CARRY_CLEARANCE + 0.075
+    lifted = A.solve_ik(A.pose_matrix([-0.13, -0.68, carry, *ppg.TOP_GRIP_ROTATION]), list(TAUGHT_Q[1]), REAL_TCP)
+    tool_z = cv2.Rodrigues(np.asarray(ppg.DRY_POSE[3:]))[0][:, 2]
+    dry = np.add(ppg.DRY_POSE[:3], ppg.DRY_DEPTH * tool_z) - ppg.DRY_APPROACH * tool_z
+    entries = {"spray": ([*np.add(ppg.SPRAY_POSE[:3], ppg.SPRAY_APPROACH), *ppg.SPRAY_POSE[3:]], TAUGHT_Q[2]),
+               "sponge": ([*np.add(ppg.SPONGE_POSE[:3], ppg.SPONGE_APPROACH), *ppg.SPONGE_POSE[3:]], ppg.SPONGE_Q),
+               "dry": ([*dry, *ppg.DRY_POSE[3:]], TAUGHT_Q[3])}
+    q_entry = {}
+    for name, (pose, q_ref) in entries.items():
+        q_entry[name] = A.solve_ik(A.pose_matrix(pose), list(q_ref), REAL_TCP)
+        samples = list(ppg.joint_samples([lifted, q_entry[name], lifted]))
+        assert min(real_self_gap(q, REAL_TCP) for q in samples) >= TAUGHT_GAP, name
+        z = [A.tcp_matrix(list(q), REAL_TCP)[2, 3] for q in samples]
+        assert min(z) >= min(carry, pose[2]) - ppg.TURN_MAX_DIP, name
+    # ... and the direct moves from station to station (sprayer -> sponge -> dryer)
+    for a, b in (("spray", "sponge"), ("sponge", "dry")):
+        samples = list(ppg.joint_samples([q_entry[a], q_entry[b]]))
+        assert min(real_self_gap(q, REAL_TCP) for q in samples) >= TAUGHT_GAP, (a, b)
+
+
+
+def test_sponge_comes_from_above_and_turns_both_ways(clock):
+    task, robot, suction = make_task(["pick_top", "sponge", "place"])
+    started = clock[0]
+    assert run(task, robot, clock) == "done"
+    entry = list(np.add(ppg.SPONGE_POSE[:3], ppg.SPONGE_APPROACH))
+    assert list(robot.ik_poses.values())[1][:3] == pytest.approx(entry)       # joint move above it
+    into = [call[1] for call in robot.calls if call[0] == "moveL" and call[1][:3] == pytest.approx(ppg.SPONGE_POSE[:3])]
+    assert len(into) == 1 and into[0][3:] == pytest.approx(ppg.SPONGE_POSE[3:])
+    assert task.sponge.speeds == [ppg.SPONGE_SPEED, -ppg.SPONGE_SPEED] and task.sponge.stops == 1
+    assert clock[0] - started >= 2 * ppg.SPONGE_SPIN_TIME
+
+
+def test_sponge_servo_failure_keeps_the_glass_and_stops_it(clock):
+    task, robot, suction = make_task(["pick_top", "sponge", "place"],
+                                     sponge=FakeSponge(error=TimeoutError("no reply from servo")))
+    run(task, robot, clock)
+    assert "sponge servo not answering" in task.status
+    assert suction.calls == ["grip"] and task.sponge.stops == 1
+
+
+def test_sponge_needs_its_servo_before_anything_moves(clock):
+    task, robot, suction = make_task(ppg.SEQUENCE)
+    task.sponge = None
+    run(task, robot, clock)
+    assert "sponge servo" in task.status and "not connected" in task.status
+    assert not [call for call in robot.calls if call[0] in ("moveL", "moveJ", "speedL")]
+
+
+# --- exclusion zones --------------------------------------------------------------------
+
+ZONE = ([0.0, -0.40, 0.0], [0.10, -0.20, 0.40])       # a box between the start and the glass
+
+
+def test_segment_box_test():
+    lo, hi = ZONE
+    assert ppg.segment_hits_box([-0.1, -0.3, 0.2], [0.2, -0.3, 0.2], lo, hi, 0.0)     # straight through
+    assert not ppg.segment_hits_box([-0.1, -0.3, 0.5], [0.2, -0.3, 0.5], lo, hi, 0.0)  # over it
+    assert ppg.segment_hits_box([-0.1, -0.3, 0.42], [0.2, -0.3, 0.42], lo, hi, 0.03)  # within the margin
+    assert ppg.segment_hits_box([0.05, -0.3, 0.2], [0.05, -0.3, 0.2], lo, hi, 0.0)    # a point inside
+
+
+def test_leaving_a_zone_is_allowed_entering_is_not(monkeypatch):
+    monkeypatch.setattr(ppg, "EXCLUSION_ZONES", [ZONE])
+    inside, outside = [0.05, -0.3, 0.2], [0.3, -0.3, 0.2]
+    assert ppg.zone_hit([inside, outside], 0.03) is None
+    assert ppg.zone_hit([outside, inside], 0.03) == 0
+
+
+def test_traversing_into_a_zone_is_refused_before_moving(clock, monkeypatch):
+    # start (0.3, -0.3, 0.3), glass (0.35, -0.45): a zone across the way over to it
+    lo, hi = [0.28, -0.42, 0.10], [0.40, -0.36, 0.30]
+    monkeypatch.setattr(ppg, "EXCLUSION_ZONES", [(lo, hi)])
+    task, robot, suction = make_task(["pick_top", "place"])
+    run(task, robot, clock)
+    assert "to glass would enter exclusion zone 0" in task.status
+    sent = [call[1][:3] for call in robot.calls if call[0] == "moveL"]
+    assert all(not ppg.segment_hits_box(p, p, lo, hi, 0.0) for p in sent)
+    assert "speedL" not in [call[0] for call in robot.calls]      # never went down to pick
+
+
+def test_station_moves_may_enter_a_zone(clock, monkeypatch):
+    # a zone around the sponge: the station goes in, traversal stays out
+    lo = np.subtract(ppg.SPONGE_POSE[:3], 0.05)
+    hi = np.add(ppg.SPONGE_POSE[:3], [0.05, 0.05, 0.12])
+    monkeypatch.setattr(ppg, "EXCLUSION_ZONES", [(list(lo), list(hi))])
+    task, robot, suction = make_task(["pick_top", "sponge", "place"])
+    assert run(task, robot, clock) == "done"
+    assert task.sponge.speeds == [ppg.SPONGE_SPEED, -ppg.SPONGE_SPEED]
+
+
+def test_a_held_glass_keeps_further_away(clock):
+    task, robot, suction = make_task(["pick_top", "place"])
+    empty = task.zone_reach()
+    task.held = "top"
+    assert task.zone_reach() == pytest.approx(empty + np.hypot(task.glass_height, task.radius))
+
+
+def test_after_the_sprayer_the_glass_goes_straight_up_first(clock):
+    task, robot, suction = make_task(["pick_top", "spray", "sponge", "place"])
+    assert run(task, robot, clock) == "done"
+    exit_xy = np.add(ppg.SPRAY_POSE[:3], ppg.SPRAY_APPROACH)[:2]
+    moves = [call for call in robot.calls if call[0] in ("moveL", "moveJ")]
+    out = next(i for i, call in enumerate(moves) if call[0] == "moveL"
+               and call[1][:2] == pytest.approx(list(exit_xy)) and call[1][2] == pytest.approx(ppg.SPRAY_POSE[2]))
+    up = moves[out + 1]
+    assert up[0] == "moveL" and up[1][:2] == pytest.approx(list(exit_xy))
+    assert up[1][2] == pytest.approx(task.table_z + ppg.TRAVERSE_HEIGHT)
+    assert moves[out + 2][0] == "moveJ"         # only then over to the sponge
+
+
+# --- several glasses, several place tags ------------------------------------------------
+
+def glass(x, y):
+    return SimpleNamespace(x=x, y=y, diameter=0.07)
+
+
+def test_the_glass_closest_to_the_base_is_picked_not_those_on_a_tag():
+    tags = {3: np.array([-0.2, -0.99]), 7: np.array([0.0, -0.99])}
+    near_base, far, placed = glass(0.05, -0.45), glass(-0.2, -0.8), glass(-0.2, -0.985)
+    assert ppg.choose_glass([far, placed, near_base], tags) is near_base
+    assert ppg.choose_glass([placed], tags) is None
+
+
+def test_tags_fill_up_in_id_order_and_c_starts_over(monkeypatch):
+    tags = {10: np.array([0.1, -0.99]), 3: np.array([-0.2, -0.99]), 7: np.array([0.0, -0.99])}
+    used = set()
+    assert ppg.next_place_tag(tags, used, []) == 3
+    used.add(3)
+    assert ppg.next_place_tag(tags, used, []) == 7
+    # a glass already standing on tag 7 (put there by hand): skipped too
+    assert ppg.next_place_tag(tags, used, [glass(0.0, -0.99)]) == 10
+    used |= {7, 10}
+    assert ppg.next_place_tag(tags, used, []) is None
+    used.clear()                                        # c
+    assert ppg.next_place_tag(tags, used, []) == 3
+    monkeypatch.setattr(ppg, "PLACE_TAG_IDS", [10, 3])  # only these, in this order
+    assert ppg.next_place_tag(tags, set(), []) == 10
+
+
+def test_a_tag_counts_as_used_once_the_glass_is_down(clock):
+    placed = []
+    task, robot, suction = make_task(["pick_top", "place"])
+    task.on_placed = lambda: placed.append(robot.pose[:2])
+    assert run(task, robot, clock) == "done"
+    assert len(placed) == 1 and placed[0] == pytest.approx(np.add([0.1, -0.5], ppg.TOP_GRIP_OFFSET), abs=0.002)
+
+
+def test_a_task_failing_before_the_glass_is_down_leaves_the_tag_free(clock):
+    placed = []
+    task, robot, suction = make_task(ppg.SEQUENCE, lose_on_flip=True)
+    task.on_placed = lambda: placed.append(True)
+    run(task, robot, clock)
+    assert "glass lost" in task.status and placed == []

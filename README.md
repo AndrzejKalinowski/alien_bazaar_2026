@@ -287,8 +287,8 @@ Press **p / Y** to run one full cycle:
 
 0. Only with `GO_TO_START_FIRST = True` (off for now): if the arm is not at `START_Q` (the **h** position), move there first; the cycle starts when it arrives.
 1. Measure the glasses (median over 15 frames) and the place tag. The last seen tag position is kept, because the placed glass covers the tag.
-2. Choose the free glass **closest to the tag** (glasses within 4 cm of the tag count as already placed).
-3. Run the steps in `SEQUENCE` on it. The default **flips the glass**: `pick_side` (grab the wall with the tool horizontal), `flip` (lift clear and turn wrist 3 by 180°, so the glass turns upside down in place), `set_down` (put it down where it was, release), `pick_top` (grab it from the top, tool pointing down), `spray` (hold it in the taught `SPRAY_POSE` in front of the sprayer and do `SPRAY_STROKES` pump strokes with the bus servo on `SPRAYER_PORT`), `place` (put it on the tag, release). Without the sprayer board connected, **p** is refused while `SEQUENCE` contains `spray`. `["pick_side", "place"]` or `["pick_top", "place"]` is the plain pick & place. Each pick waits for `GRIP OK` (at most 6 s; otherwise release and back off), each move with a glass held watches for `GRIP LOST`, each put-down descends slowly until **> 8 N** and waits 1.7 s for the release.
+2. Choose the glass **closest to the robot base** (glasses within 4 cm of a place tag count as already placed) and the **next free place tag**: the lowest id (or the next in `PLACE_TAG_IDS`) that has not had a glass put on it this round. Every **p** does one glass; when all tags are used, **p** is refused and **c** clears them for the next round.
+3. Run the steps in `SEQUENCE` on it. The default **flips the glass**: `pick_side` (grab the wall with the tool horizontal), `flip` (lift clear and turn wrist 3 by 180°, so the glass turns upside down in place), `set_down` (put it down where it was, release), `pick_top` (grab it from the top, tool pointing down), `spray` (hold it in the taught `SPRAY_POSE` in front of the sprayer and do `SPRAY_STROKES` pump strokes with the bus servo on `SPRAYER_PORT`), `sponge` (hold it on the sponge at the taught `SPONGE_POSE`, coming from above, while the second bus servo turns the sponge `SPONGE_SPIN_TIME` each way), `dry` (hold it at the taught `DRY_POSE` and swing it about the tool axis), `place` (put it on the tag, release). Without the sprayer board connected, **p** is refused while `SEQUENCE` contains `spray`. `["pick_side", "place"]` or `["pick_top", "place"]` is the plain pick & place. Each pick waits for `GRIP OK` (at most 6 s; otherwise release and back off), each move with a glass held watches for `GRIP LOST`, each put-down descends slowly until **> 8 N** and waits 1.7 s for the release.
 4. Go back up and return to the start pose, out of the camera's view.
 
 `SEQUENCE` is checked before anything moves: steps that don't fit together (a flip without a side grip, a pick with a glass held, a glass still held at the end) are refused. Tool turns (sideways, pointing down) happen high up over the start position, so the start orientation can be anything. For `pick_top` the tool points down in the start orientation if that is within 10° of down, otherwise in the `START_Q` orientation. The flip needs a TCP offset without x/y on the pendant. Touching any stick during a task **aborts it** (manual override). To add a step, see the docstring of `pick_place_glasses.py`.
@@ -364,6 +364,9 @@ Keyboard keys work when the OpenCV video window has focus. Gamepad buttons use X
 | Stop | **s / A** | **s / A** | **s / A** | – |
 | Grip (vacuum on) | **g / B** | **g / B** | – | – |
 | Release | **r / X** | **r / X** | – | – |
+| Spray (a few pump strokes; again = stop) | **y / Back** | – | – | – |
+| Freedrive on / off (not limited by the ceiling) | **f / right stick click** | – | – | **f / B** |
+| Exclusion box corner (press at two opposite corners, prints `EXCLUSION_ZONES`) | **b / left stick click** | – | – | – |
 | Home | **h / Start** | **h / Start** | – | – |
 | Other | – | – | **t / B** tip → area corner, **u** undo, **x** clear area | **n / X** skip, **f / B** freedrive, **c / Y** solve |
 | Quit | **q / Esc** | **q / Esc** | **q / Esc** | **q / Esc** |
@@ -459,7 +462,7 @@ These are software guards, **not** a replacement for the UR safety configuration
 | `MIN_TCP_Z` | −0.05 m | `follow_april_tag.py` (imported by the others) | Targets are clamped above this height (table guard). Jogging down slows near it and stops at it |
 | `MAX_TCP_Z` | 0.85 m | `safe_motion.py` (all active scripts) | Every script sends motion through `SafeControl`. A `moveL` target above it, or a `moveJ` whose arc goes above it, is refused (`MotionRefused`) before anything is sent. `speedL` (jogging, servoing) slows near it and cannot go up past it. Tasks more than 2 cm above it are aborted. Only the TCP is limited; also set a safety plane on the pendant |
 | Jog Z limit | `Z_LIMIT_GAIN` = 2 /s | `gamepad_jog.py` (`Jogger`, `limit_z_speed`), used by every script | Z jog speed ≤ gain × distance to the limit: slowdown starts 4 cm before it. Beyond a limit only the way back is allowed |
-| `MAX_OVERSHOOT` | 20 mm / 15 mm | tag picker / glass pick-place | The farthest a force-guarded push may go past the expected surface |
+| `MAX_OVERSHOOT` | 20 mm / 15 mm | tag picker / glass pick-place | The farthest a force-guarded push may go past the expected surface. In pick-place it is for placing; picking uses `TOP_PICK_OVERSHOOT` (25 mm, top) and `SIDE_MAX_PRESS` (15 mm past the expected wall, side) |
 | `CONTACT_FORCE` / `PLACE_FORCE` | 12 N / 10 N / 8 N | tag pick / glass pick / glass place | Descent stops above this force |
 | `CAMERA_TIMEOUT` / `FRAME_TIMEOUT` | 0.5 s | `follow_april_tag.py` / `find_glasses.py` | No new frame → `speedStop` / error. `pick_place_glasses` then stops the robot and keeps running (recovers in place); `find_glasses` ends and its `finally` stops the robot |
 | `WATCHDOG_MIN_FREQUENCY` | 5 Hz | `robot_watchdog.py`, used by `pick_place_glasses`, `find_glasses`, `follow_april_tag`, `gamepad_robot_teleop` | The controller stops the control script if no RTDE input arrives for 0.2 s. The next loop iteration re-uploads it and aborts the task |
@@ -485,7 +488,7 @@ The settings are module-level constants (UPPER_CASE, units in comments) at the t
 | Overhead camera index | `find_glasses.py` (`OVERHEAD_CAMERA_INDEX`) | `2` |
 | AprilTag size (wrist picker, hand-eye) | `follow_april_tag.py` (`TAG_SIZE`) | 0.08 m |
 | Glass geometry | `find_glasses.py` (`RIM_HEIGHT`, `GLASS_MIN/MAX_DIAMETER`), `pick_place_glasses.py` (`GLASS_HEIGHT`) | 0.075, 0.05–0.10 m, 0.075 m |
-| Place tag | `pick_place_glasses.py` (`PLACE_TAG_ID`) | `None` = lowest id in view |
+| Place tags | `pick_place_glasses.py` (`PLACE_TAG_IDS`) | `None` = every tag in view, filled in id order; **c** clears the used ones |
 | Motion speeds / forces | top of `pick_place_glasses.py`, `follow_april_tag.py`, `gamepad_jog.py` | see files |
 
 To find COM ports: Device Manager → Ports, or `python -m serial.tools.list_ports -v`.

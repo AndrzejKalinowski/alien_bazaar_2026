@@ -13,8 +13,8 @@ Task (p / gamepad Y):
      as h), moveJ there first; the rest starts when it has arrived.
   1. Measure the glasses and the place tag (averaged over several frames; the
      robot at START_Q is out of the camera's view).
-  2. Choose the glass closest to the tag (glasses already standing on the tag
-     are skipped).
+  2. Choose the glass closest to the robot base (glasses standing on a place
+     tag are skipped) and the next free place tag (see below).
   3. A wrist wound up more than UNWIND_ABOVE_DEG (jogging and moveL wind
      them up a turn at a time) is turned back a full turn first, gripper
      empty, where the arm stands (raised if the swing would sag), one wrist
@@ -25,16 +25,28 @@ Task (p / gamepad Y):
   the system_arm capsule model: the gripper may not come closer to the arm
   than in the closest taught pose (SELF_GAP_MARGIN), so a move the pendant
   would stop with "tool hitting the arm" is refused before it is sent.
-  4. Up, over the start position the tool turns back to its start orientation,
-     back to the start pose (keep it out of the camera view).
+  Exclusion zones (EXCLUSION_ZONES, boxes in the base frame, drawn red in the
+  video): no move may take the TCP into one, grown by EXCLUSION_MARGIN and,
+  with a glass held, by a sphere holding the whole glass. Checked before the
+  move is sent (moveL as a line, moveJ along its arc in the system_arm model,
+  pushes, unwinding, h), and refused if it would enter. The station moves
+  (to, into, out of and between spray / sponge / dry) are exempt: the devices
+  are in there. A move that starts inside a zone may leave it. Only the TCP and
+  the glass are checked, not the arm links. Teach a box with b at two opposite
+  corners.
+  4. Up, the tool turns back to its start orientation, back to the start pose
+     (keep it out of the camera view).
   SEQUENCE is checked before anything moves (and at program start): a pick with
   a glass held, a flip without a side grip, a put-down with nothing held or a
   glass still held at the end is refused. Every step starts and ends with the
   tool at carry height (clears the other glasses by CARRY_CLEARANCE, with what
-  it holds). Whenever a step needs another tool orientation (sideways for
-  pick_side, pointing down for pick_top), the tool goes up and turns over the
-  start position, away from the glasses, so the start orientation can be
-  anything. The turn is a joint move to the IK solution nearest the taught
+  it holds, and never below TRAVERSE_HEIGHT above the table: travel, turns,
+  flips and unwinding happen above that plane; station moves go below it).
+  Whenever a step needs another tool orientation (sideways for pick_side,
+  pointing down for pick_top), the tool goes up to carry height and
+  turns where it is (TURN_OVER_START: over the start position instead, away
+  from the glasses, slower), so the start orientation can be anything. The
+  turn is a joint move to the IK solution nearest the taught
   joints (SIDE_GRIP_Q / TOP_GRIP_Q, o prints them) or else the joints at the
   start of the task, so the arm has the taught shape and the joints end the
   same way every cycle (moveL turns let a wrist wind up a turn per cycle until
@@ -43,8 +55,8 @@ Task (p / gamepad Y):
   ceiling), so it never goes more than TURN_MAX_DIP below the safe height.
   After every grip, the glass position is taken from
   where the cup is, not the camera. The window shows "step i/n name: what it does".
-  The default SEQUENCE flips the glass, sprays it, dries it and places it:
-  pick_side, flip, set_down, pick_top, spray, dry, place. To add a step, write a step_<name> generator in SequenceTask and give
+  The default SEQUENCE flips the glass, sprays, sponges and dries it and places
+  it: pick_side, flip, set_down, pick_top, spray, sponge, dry, place. To add a step, write a step_<name> generator in SequenceTask and give
   it a STEP_GRIPS entry (what it needs held before, what it leaves held).
 
 Steps:
@@ -72,26 +84,33 @@ Steps:
   set_down   Lower the held glass where it is (the spot it was picked from is
              free), slowly down until it touches the table, release, up (a
              side grip backs off SIDE_STANDOFF sideways first).
-  spray      Joint move (glass held) to SPRAY_APPROACH above the taught
-             SPRAY_POSE, in the taught arm configuration SPRAY_Q; straight into
-             SPRAY_POSE; SPRAY_STROKES pump strokes of the sprayer servo
-             (bus_servos.Sprayer on SPRAYER_PORT, in its own thread, so the loop
-             goes on); back out and a joint move back to the joints the step
-             started from. The arcs of both joint moves are checked to keep
-             the TCP above carry height - TURN_MAX_DIP. Refused before anything
-             moves when the sprayer did not answer at program start. Stopping
-             (s, sticks, a fault) ends the spraying after the current stroke;
-             the glass stays held.
+  spray      Joint move (glass held, arc checked) to SPRAY_POSE + SPRAY_APPROACH
+             (5 cm back along base x), in the taught arm configuration SPRAY_Q;
+             straight into SPRAY_POSE; SPRAY_STROKES pump strokes, one every
+             SPRAY_PERIOD, of the sprayer servo (bus_servos.Sprayer on
+             SPRAYER_PORT, in its own thread, so the loop goes on); back out the
+             same way and straight up to the traverse plane (every station
+             leaves upwards). Refused before anything moves when the sprayer
+             did not answer at program start. Stopping (s, sticks, a fault)
+             ends the spraying after the current stroke; the glass stays held.
+  sponge     Like spray at the taught SPONGE_POSE, coming from above
+             (SPONGE_APPROACH), then the sponge servo (bus_servos.ROTATOR_ID)
+             turns SPONGE_SPIN_TIME one way at SPONGE_SPEED and as long the
+             other way, then stops (also on s / abort / failure).
   dry        Joint move (glass held, arc checked) to DRY_APPROACH back along the
-             tool z axis from the taught DRY_POSE, in the taught configuration
-             DRY_Q; along the tool z axis into DRY_POSE; wrist 3 swings
-             DRY_ANGLE_DEG one way and the other, DRY_SWINGS times (about the
-             tool z axis: the TCP stays, the glass turns about its own axis with
-             the top grip; needs the TCP on the flange axis like the flip); back
-             to the middle and out along the tool z axis.
-             spray and dry are stations: the arm goes from one straight to the
-             next, and back to the joints it had before the first one only
-             before a step that is not a station.
+             tool z axis from the taught DRY_POSE (tool pointing down: from
+             above), in the taught configuration DRY_Q; along the tool z axis
+             into DRY_POSE (DRY_DEPTH deeper); wrist 3 turns to each angle of
+             DRY_TURNS_DEG (now +180 deg once; about the tool z axis: the TCP
+             stays, the glass turns about its own axis with the top grip; needs
+             the TCP on the flange axis like the flip); out along the tool z
+             axis as turned.
+             spray, sponge and dry are stations: from one straight to the next
+             when that move passes the checks, otherwise back through the
+             joints the arm had before the first one; always back there before
+             any other step.
+             With the glass held, the joint arcs may sag TURN_MAX_DIP below the
+             lower of carry height and the move's two ends.
   place      The same as set_down, with the glass axis over the place tag.
   The flipped glass is GLASS_HEIGHT tall either way up, so pick_top after a
   flip lands at the same height, on the end that stood on the table before
@@ -116,9 +135,18 @@ Keys (video window) / gamepad:
   s  / A (south)   stop / abort (vacuum stays as it is)
   g  / B (east)    grip (vacuum on)
   r  / X (west)    release
+  y  / Back        spray MANUAL_SPRAY_STROKES strokes; again while spraying: stop
+  b  / left stick click    teach an exclusion box: press at two opposite corners
+                   (tip position), the EXCLUSION_ZONES line is printed
+  f  / right stick click   freedrive on / off (move the arm by hand; the sticks
+                   don't jog, p / h are refused until it is off; s, an error
+                   or quitting also end it). Not limited by MAX_TCP_Z. Handy
+                   with o to teach poses.
+                   (refused while a task runs or without the sprayer)
   h  / Start       go to the start position (START_Q, tool pointing down)
   o                print the taught constants of the current tool pose: TOP_GRIP_*
                    when it points down, else SIDE_GRIP_* and SPRAY_POSE / SPRAY_Q
+  c                clear the used place tags (a new round; keyboard only)
   q / Esc          quit
   Sticks jog the robot (gamepad_jog.py); touching them aborts a running task.
   The mouse edits the detection area as in find_glasses.py.
@@ -129,11 +157,17 @@ Keys (video window) / gamepad:
 All motion goes through safe_motion.py: the TCP never goes above MAX_TCP_Z
 (0.85 m above the base). A move that would is refused and the task stops.
 
-The place tag (PLACE_TAG_ID, any 36h11 size) lies flat on the table inside
-the camera view; its last seen position is kept, since the placed glass covers
-it. It is shown as a cyan square in the video (with its id) and on the map.
-With PLACE_TAG_ID = None the lowest id in view is used; p warns when more
-than one tag is in view (e.g. a calibration tag left on the table).
+Several glasses, several place tags (any 36h11 size, flat on the table in the
+camera view): every p takes the glass closest to the robot base (horizontal
+distance from the base axis) and puts it on the next free tag: the lowest id
+(or the next in PLACE_TAG_IDS) that has not had a glass put on it this round
+and has no glass standing on it (PLACED_RADIUS). Glasses standing on a tag
+are never picked. Each tag's last seen position is kept, since the glass put
+on it covers it. A tag counts as used once its glass is put down (a task that
+fails before that leaves it free). All used: p is refused; c clears the used
+tags for the next round. In the video the next tag is a bright cyan square,
+used ones gray, the others dark cyan. With PLACE_TAG_IDS = None every tag in
+view is a place tag, so take calibration tags off the table.
 
 Motion watchdog (robot_watchdog.py): the robot stops by itself if the main
 loop sends nothing for 0.2 s (stalled loop, camera hang, breakpoint). The
@@ -177,15 +211,21 @@ from safe_motion import MotionRefused
 from serial import SerialException
 from suction import key_command
 
-PLACE_TAG_ID = None          # None = the lowest id in view
-PLACED_RADIUS = 0.04         # m, a glass this close to the tag already stands on it
+PLACE_TAG_IDS = None         # place tags in the order they are filled; None = every tag in view, by id
+PLACED_RADIUS = 0.04         # m, a glass this close to a place tag already stands on it
 GLASS_HEIGHT = 0.075         # m, upside-down glass: table to top of the foot (seen circle, cup lands here)
 
 CARRY_CLEARANCE = 0.05       # m, gap under the carried glass over the other glasses
+TRAVERSE_HEIGHT = 0.30       # m above the table: the TCP travels, turns, flips and unwinds at least
+                             # this high (station moves go down to the devices)
 APPROACH_GAP = 0.02          # m, stop this far above the foot / placing height, then go slowly
-MAX_OVERSHOOT = 0.015        # m, push at most this far past the expected height
+MAX_OVERSHOOT = 0.015        # m, push at most this far past the expected height (placing)
+TOP_PICK_OVERSHOOT = 0.025   # m, the same for the top pick (was MAX_OVERSHOOT, 15 mm); the push still
+                             # stops at CONTACT_FORCE on the glass
 MAX_TILT_DEG = 10            # deg, "pointing down" / "horizontal" within this
-TURN_TOLERANCE_DEG = 1       # deg, a smaller orientation change needs no turn over the start position
+TURN_TOLERANCE_DEG = 1       # deg, a smaller orientation change needs no turn
+TURN_OVER_START = False      # True: tool turns go back over the start position (away from the glasses);
+                             # False: where the tool is, at carry height (saves ~3 round trips a cycle)
 
 # --- sequence -------------------------------------------------------------------
 # What p does with the chosen glass, step by step (SequenceTask.step_<name>):
@@ -194,17 +234,18 @@ TURN_TOLERANCE_DEG = 1       # deg, a smaller orientation change needs no turn o
 #   flip       turn the side-gripped glass upside down in the air (wrist 3, 180 deg)
 #   set_down   put the held glass down where it is and release
 #   spray      hold the glass in the taught SPRAY_POSE and work the sprayer servo
+#   sponge     hold the glass in the taught SPONGE_POSE and spin the sponge servo
 #   dry        hold the glass in the taught DRY_POSE and swing it about the tool axis
 #   place      put the held glass down on the place tag and release
 # ["pick_side", "place"] / ["pick_top", "place"] are the plain pick & place.
-SEQUENCE = ["pick_side", "flip", "set_down", "pick_top", "spray", "dry", "place"]
+SEQUENCE = ["pick_side", "flip", "set_down", "pick_top", "spray", "sponge", "dry", "place"]
 
 # --- flip -----------------------------------------------------------------------
 FLIP_SPEED = 0.9             # rad/s, wrist 3 turn with the glass held (was 0.5, raised for speed)
 FLIP_ACCEL = 0.9             # rad/s^2 (was 0.5)
 MAX_TCP_XY_OFFSET = 0.005    # m, the flip turns around the flange axis: a TCP off it would swing the glass
 
-# --- tool turns (over the start position, see SequenceTask.turn) ----------------------
+# --- tool turns (see SequenceTask.turn) ------------------------------------------------
 TURN_SPEED = 1.0             # rad/s, moveJ to the turned orientation (nothing held; was 0.5)
 TURN_ACCEL = 1.0             # rad/s^2 (was 0.5)
 TURN_MAX_DIP = 0.02          # m, the TCP may sag this far below the safe height on the joint arc;
@@ -217,35 +258,61 @@ CONFIG_TOLERANCE_DEG = 5     # deg, joints this close to the IK solution near th
                              # taught arm configuration (another branch is ~180 deg off)
 IK_MAX_ERROR = 1e-10         # m / rad, getInverseKinematics max position / orientation error (its default)
 
+# --- exclusion zones ----------------------------------------------------------------
+# Boxes the tool may not enter while traversing (carry, turns, flips, pushes, unwinding,
+# h), in the base frame: ([xmin, ymin, zmin], [xmax, ymax, zmax]) in m. The station moves
+# (spray, sponge, dry: to, into, out of and between them) may, the devices are there.
+# Teach one with b / left stick click at two opposite corners (it prints the line).
+# EXCLUSION_ZONES = [([0.086, -0.767, 0.054], [0.292, -0.431, 0.274])]
+EXCLUSION_ZONES =[]
+EXCLUSION_MARGIN = 0.03      # m around the TCP (the gripper body); with a glass held, plus a
+                             # sphere around the TCP that holds the whole glass
+
 # --- spray ------------------------------------------------------------------------
 # Taught spray pose, TCP in the base frame (o prints it): the glass held from the top,
-# tool horizontal, in front of the sprayer. SPRAY_Q = the arm configuration there
-# (joints in rad, wrapped to +-180 deg). The arm goes to SPRAY_APPROACH above it with a
-# joint move, then straight to it, sprays, and comes back the same way.
-SPRAY_POSE = [0.02146, -0.48790, 0.17105, 1.79814, 0.66820, 1.76831]
-SPRAY_Q = [-1.61396, -2.01892, -1.91088, -2.06821, 3.12364, 1.11749]
-SPRAY_APPROACH = [0.0, 0.0, 0.10]   # m in the base frame, start of the straight last bit
+# the tool (and glass) pointing along base +x, 27 deg up, in front of the sprayer.
+# SPRAY_Q = the arm configuration there (joints in rad, wrapped to +-180 deg). The arm
+# goes to SPRAY_POSE + SPRAY_APPROACH with a joint move, then straight in, sprays, and
+# comes back the same way.
+SPRAY_POSE = [0.02906, -0.48694, 0.14569, 1.26169, 0.53405, 2.03612]
+SPRAY_Q = [-1.55987, -2.38400, -2.13538, -0.22390, -2.67745, 2.29890]
+SPRAY_APPROACH = [-0.05, 0.0, 0.0]  # m in the base frame, start of the straight last bit: along
+                                    # +x into the spray pose (the glass points +x there). Further
+                                    # back folds the arm tighter (model: -15 mm at 5 cm, -24 at 10)
 SPRAY_MOVE_SPEED = 0.9       # rad/s, joint moves with the glass held (as FLIP_SPEED; was 0.5)
 SPRAY_MOVE_ACCEL = 0.9       # rad/s^2 (was 0.5)
-SPRAY_STROKES = 10           # pump strokes (was 3, then 6)
+SPRAY_STROKES = 3            # pump strokes (was 6, 10, 5)
 SPRAY_PERIOD = 1.2           # s between the starts of two strokes (bus_servos default 2.0; a stroke
                              # itself takes ~0.5 s: press, SPRAY_HOLD 0.2 s, release)
 SPRAY_TIMEOUT = SPRAY_STROKES * SPRAY_PERIOD + 8.0   # s, the strokes must be done by then
 SPRAYER_PORT = bus_servos.PORT   # COM port of the bus servo board (machine-specific)
+MANUAL_SPRAY_STROKES = 3     # pump strokes per y / Back press (at SPRAY_PERIOD)
+
+# --- sponge -------------------------------------------------------------------------
+# Taught sponge pose (o prints it like SPRAY_POSE): the glass held from the top, tool
+# pointing down (6 deg off), on the sponge. SPONGE_Q = the arm configuration there. The
+# arm goes (joint move) to SPONGE_APPROACH above it, straight down onto it, then the
+# sponge servo (bus_servos.ROTATOR_ID, same board as the sprayer) turns SPONGE_SPIN_TIME
+# one way and SPONGE_SPIN_TIME the other, then stops.
+SPONGE_POSE = [0.29664, -0.60054, 0.18340, -2.09057, 2.28208, 0.14519]
+SPONGE_Q = [-0.91937, -2.10711, -1.45363, -1.24989, 1.60516, -0.83510]
+SPONGE_APPROACH = [0.0, 0.0, 0.10]  # m in the base frame: from above, straight down onto it
+SPONGE_SPEED = 2890          # steps/s, 85 % of the ST3215's ~3400 (4096 steps a turn)
+SPONGE_SPIN_TIME = 10.0      # s each way
 
 # --- dry --------------------------------------------------------------------------
-# Taught drying pose (o prints it like SPRAY_POSE), glass held from the top, tool tilted
-# 44 deg from pointing down, pointing along base -y. DRY_Q = the arm configuration there.
-# The arm goes (joint move) to DRY_APPROACH back along the tool z axis from it, moves in
-# along the tool z axis, then swings wrist 3 (= about the tool z axis, the glass axis
-# with the top grip) DRY_ANGLE_DEG one way and back the other, DRY_SWINGS times.
-DRY_POSE = [0.18011, -0.65140, 0.26149, 1.10045, -2.39825, 0.94916]
-DRY_Q = [-0.99394, -2.15914, -1.15118, 2.40696, -1.16133, 2.71361]
+# Taught drying pose (o prints it like SPRAY_POSE), glass held from the top, tool pointing
+# down (2 deg off). DRY_Q = the arm configuration there. The arm goes (joint move) to
+# DRY_APPROACH back along the tool z axis from it (here: above it), moves in along the tool
+# z axis, then turns wrist 3 (= about the tool z axis, the glass axis with the top grip)
+# to each of DRY_TURNS_DEG in turn, and backs out along the tool z axis as it is turned.
+DRY_POSE = [0.18048, -0.71972, 0.16708, -3.09267, 0.34858, 0.02415]
+DRY_Q = [-1.14279, -2.26088, -1.25626, -1.22920, 1.57242, -2.49099]
 DRY_APPROACH = 0.10          # m back along the tool z axis, start of the straight last bit
-DRY_ANGLE_DEG = 60           # deg each way from the drying pose
-DRY_SWINGS = 3               # right-left swings
-DRY_FIRST_DIRECTION = -1     # -1: first clockwise looking along the tool z axis (out of the cup), +1: the other way
-DRY_SPEED = 1.5              # rad/s, wrist 3 swings (the glass turns about its own axis)
+DRY_DEPTH = 0.0              # m further along the tool z axis than the taught DRY_POSE
+DRY_TURNS_DEG = [180]        # deg, wrist 3 angles visited in order, relative to where it arrives
+                             # (+ = the joint's plus direction); [60, -60] * 3 + [0] swings instead
+DRY_SPEED = 1.5              # rad/s, wrist 3 turns (the glass turns about its own axis)
 DRY_ACCEL = 3.0              # rad/s^2
 
 # --- start ----------------------------------------------------------------------
@@ -260,6 +327,8 @@ UNWIND_ABOVE_DEG = 200       # deg, a wrist further than this from zero is turne
                              # turn at the start of a task (see SequenceTask.unwind)
 SELF_GAP_MARGIN = 0.005      # m, joint moves may not bring the gripper closer to the arm than the
                              # closest taught pose does, minus this (system_arm capsules, see self_gap)
+SELF_GAP_PROVEN = -0.020     # m, model gap of a pose the arm reached by hand without touching (the
+                             # first spray pose): the limit is never tighter than this minus the margin
 SELF_CHECK_STEP_DEG = 3      # deg of the biggest joint change between self-collision samples
 UNWIND_PARK_STEP_DEG = 15    # deg, wrist-1 angles tried to make the wrist-2 turn clear
 JOINT_NAMES = ("base", "shoulder", "elbow", "wrist 1", "wrist 2", "wrist 3")
@@ -296,7 +365,7 @@ SIDE_GRIP_Q = [-1.54158, -2.26731, -1.93571, -2.10989, -1.57190, -2.33435]
 SIDE_APPROACH_YAW_DEG = 8    # deg, turn the approach from radial (base -> glass) around vertical
 SIDE_ROLL_DEG = 138          # deg, tool turned around its own axis: 0 = tool x straight down (o key reads it off)
 SIDE_STANDOFF = 0.03         # m, gap between cup and wall before the slow approach and after release
-SIDE_MAX_PRESS = 0.006       # m, go at most this far past the expected wall (camera error, cup compression)
+SIDE_MAX_PRESS = 0.015       # m, go at most this far past the expected wall (camera error, cup compression; was 6 mm)
 SIDE_CONTACT_FORCE = 20.0     # N, stop the sideways approach early (a free glass slides before this)
 
 MOVE_SPEED = 0.35            # m/s, moveL (was 0.15)
@@ -321,7 +390,8 @@ HOME_ACCEL = 1.0             # rad/s^2
 RECONNECT_DELAY = 1.0        # s, wait after a failed reconnect before the loop retries
 
 GAMEPAD_KEYS = {"BTN_NORTH": "p", "BTN_SOUTH": "s", "BTN_EAST": "g",
-                "BTN_WEST": "r", "BTN_START": "h"}
+                "BTN_WEST": "r", "BTN_START": "h", "BTN_SELECT": "y",
+                "BTN_THUMBR": "f", "BTN_THUMBL": "b"}
 
 
 class TaskFailed(Exception):
@@ -452,6 +522,9 @@ class HomeTask(Task):
         home_z = self.c.getForwardKinematics(START_Q)[2]
         if home_z > MAX_TCP_Z:
             raise TaskFailed(f"start is above the ceiling ({home_z:.3f} > {MAX_TCP_Z:.3f} m), not moving")
+        zone = joint_path_zone_hit(self.c, [self.r.getActualQ(), START_Q], EXCLUSION_MARGIN)
+        if zone is not None:
+            raise TaskFailed(f"going to the start would enter exclusion zone {zone}, jog around it first")
         self.move_j(START_Q, HOME_SPEED, HOME_ACCEL)
         yield from self.wait_move("going to start..." + (" (then pick)" if self.then_pick else ""))
         self.arrived = True
@@ -588,6 +661,64 @@ def rotation_angle(a, b):
     return np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))
 
 
+def segment_hits_box(p0, p1, lo, hi, reach):
+    """True when the segment p0 -> p1 passes through the box lo..hi grown by reach on
+    every side (slab test)."""
+    p0, p1 = np.asarray(p0, dtype=float), np.asarray(p1, dtype=float)
+    lo, hi = np.asarray(lo, dtype=float) - reach, np.asarray(hi, dtype=float) + reach
+    d = p1 - p0
+    t0, t1 = 0.0, 1.0
+    for i in range(3):
+        if abs(d[i]) < 1e-12:
+            if p0[i] < lo[i] or p0[i] > hi[i]:
+                return False
+            continue
+        a, b = sorted(((lo[i] - p0[i]) / d[i], (hi[i] - p0[i]) / d[i]))
+        t0, t1 = max(t0, a), min(t1, b)
+        if t0 > t1:
+            return False
+    return True
+
+
+def zone_hit(points, reach):
+    """Index of the first EXCLUSION_ZONES box the path through points (base x, y, z)
+    enters, the box grown by reach; None if none. A zone the path starts in is
+    ignored: leaving one is always allowed, so the arm can never get stuck in it."""
+    pts = [np.asarray(p, dtype=float)[:3] for p in points]
+    pts = pts * 2 if len(pts) == 1 else pts
+    for i, (lo, hi) in enumerate(EXCLUSION_ZONES):
+        if segment_hits_box(pts[0], pts[0], lo, hi, reach):
+            continue
+        if any(segment_hits_box(a, b, lo, hi, reach) for a, b in zip(pts, pts[1:])):
+            return i
+    return None
+
+
+def joint_path_zone_hit(c, waypoints, reach):
+    """zone_hit() for the TCP of moveJs through waypoints (system_arm model, nominal DH)."""
+    if not EXCLUSION_ZONES:
+        return None
+    T_tool = system_arm.pose_matrix(c.getTCPOffset())
+    return zone_hit([system_arm.tcp_matrix(list(q), T_tool)[:3, 3] for q in joint_samples(waypoints)], reach)
+
+
+def draw_zones(image, finder):
+    """The exclusion boxes, red, as the overhead camera sees them."""
+    T_cam_base = np.linalg.inv(finder.T_base_cam)
+    rvec, _ = cv2.Rodrigues(T_cam_base[:3, :3])
+    for i, (lo, hi) in enumerate(EXCLUSION_ZONES):
+        corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+        if np.any((T_cam_base[:3, :3] @ corners.T + T_cam_base[:3, 3:4])[2] <= 0):
+            continue                                          # behind the camera
+        pixels, _ = cv2.projectPoints(corners, rvec, T_cam_base[:3, 3], finder.K, None)
+        p = [tuple(int(v) for v in px) for px in pixels.reshape(-1, 2)]
+        for a in range(8):
+            for b in range(a + 1, 8):
+                if bin(a ^ b).count("1") == 1:              # corners differing in one axis: an edge
+                    cv2.line(image, p[a], p[b], (0, 0, 255), 1)
+        cv2.putText(image, f"zone {i}", p[7], cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+
 def self_gap(q, T_flange_tcp):
     """Smallest gap (m) between the gripper / wrist 3 and the upper arm / forearm, in the
     system_arm capsule model. Its radii are conservative: the taught spray pose (tool
@@ -674,8 +805,9 @@ def unwind_waypoints(q, gap_of, z_of, min_gap):
 # What each step needs held before it and leaves held after it: None = nothing,
 # "top" / "side" = the glass held with that grip, "held" = either grip
 STEP_GRIPS = {"pick_top": (None, "top"), "pick_side": (None, "side"), "flip": ("side", "side"),
-              "spray": ("held", "held"), "dry": ("held", "held"), "set_down": ("held", None), "place": ("held", None)}
-STATION_STEPS = {"spray", "dry"}   # hold the glass at a taught pose, chained (to_station)
+              "spray": ("held", "held"), "sponge": ("held", "held"),
+              "dry": ("held", "held"), "set_down": ("held", None), "place": ("held", None)}
+STATION_STEPS = {"spray", "sponge", "dry"}   # hold the glass at a taught pose, chained (to_station)
 GRIP_WORDS = {None: "nothing held", "top": "a top grip", "side": "a side grip", "held": "a glass held"}
 
 
@@ -711,9 +843,10 @@ class SequenceTask(Task):
     """
 
     def __init__(self, r, c, suction, glass, place_xy, table_z, glass_height, sequence=SEQUENCE,
-                 sprayer=None):
+                 sprayer=None, sponge=None, on_placed=None):
         self.suction = suction
         self.sprayer = sprayer
+        self.sponge = sponge            # bus_servos.BusServo turning the sponge
         self.glass_xy = np.array([glass.x, glass.y])
         self.radius = SIDE_GRIP_RADIUS if SIDE_GRIP_RADIUS is not None else glass.diameter / 2
         self.place_xy = np.asarray(place_xy)
@@ -726,27 +859,61 @@ class SequenceTask(Task):
         self.flipped = False         # wrist 3 turned by flip(), turned back by the next turn()
         self.station_return_q = None  # joints before the first station (spray, dry), see to_station
         self.station_exit = None      # pose to back out to from the current station
+        self.on_placed = on_placed      # called once the glass is down on its tag
         super().__init__(r, c)
 
     @property
     def carry_z(self):
-        # The glass hangs self.hang below the tip, over glasses glass_height tall
-        return self.table_z + self.glass_height + CARRY_CLEARANCE + self.hang
+        # The glass hangs self.hang below the tip, over glasses glass_height tall; never
+        # below the traverse plane
+        return max(self.table_z + self.glass_height + CARRY_CLEARANCE + self.hang, self.traverse_z)
+
+    @property
+    def traverse_z(self):
+        return self.table_z + TRAVERSE_HEIGHT
+
+    def turn_floor(self, safe_z):
+        """Lowest TCP z allowed on a turn / unwinding arc at safe_z: TURN_MAX_DIP below
+        it, but never below the traverse plane (the turn is raised instead)."""
+        return max(safe_z - TURN_MAX_DIP, self.traverse_z)
 
     @property
     def flip_z(self):
         # Turning around the tool z axis (horizontal), the glass sweeps a circle through
         # its farthest point: its far end along the glass axis, one radius to the side
         sweep = np.hypot(max(self.hang, self.glass_height - self.hang), self.radius)
-        return self.table_z + self.glass_height + CARRY_CLEARANCE + sweep
+        return max(self.table_z + self.glass_height + CARRY_CLEARANCE + sweep, self.traverse_z)
 
     # --- motion helpers ---------------------------------------------------------------
-    def move_to(self, xyz, label, holding=False, rotation=None, speed=MOVE_SPEED):
+    def move_to(self, xyz, label, holding=False, rotation=None, speed=MOVE_SPEED, station=False):
+        """moveL; refused before it is sent if it would enter an exclusion zone (not
+        for station moves: the cleaning devices are in the zones)."""
         xyz = [xyz[0], xyz[1], min(max(xyz[2], MIN_TCP_Z), MAX_TCP_Z)]
         rotation = self.rotation if rotation is None else rotation
+        if not station:
+            self.check_zones([self.r.getActualTCPPose()[:3], xyz], label)
         self.move_l(xyz + list(rotation), speed, MOVE_ACCEL)
         steps = self.wait_move(label)
         yield from self.watch_grip(steps, self.c.stopL) if holding else steps
+
+    def zone_reach(self):
+        """How far around the TCP must stay out of the zones: the gripper body, and with
+        a glass held a sphere around the TCP that holds the whole glass."""
+        reach = EXCLUSION_MARGIN
+        if self.held is not None:
+            reach += np.hypot(self.glass_height, self.radius)
+        return reach
+
+    def check_zones(self, points, label):
+        """Refuse a move along points (base x, y, z) that would enter an exclusion zone."""
+        zone = zone_hit(points, self.zone_reach())
+        if zone is not None:
+            raise TaskFailed(f"{label} would enter exclusion zone {zone}, not moving")
+
+    def check_zones_joints(self, waypoints, label):
+        zone = joint_path_zone_hit(self.c, waypoints, self.zone_reach())
+        if zone is not None:
+            raise TaskFailed(f"{label} would enter exclusion zone {zone}, not moving")
 
     def watch_grip(self, steps, stop):
         """Pass a move's steps through; stop it if the vacuum reports the glass lost."""
@@ -760,6 +927,8 @@ class SequenceTask(Task):
         """Slowly along direction until the force sensor feels contact or max_travel is covered."""
         direction = np.asarray(direction, dtype=float)
         direction /= np.linalg.norm(direction)
+        start = np.asarray(self.r.getActualTCPPose()[:3])
+        self.check_zones([start, start + direction * max_travel], label)
         self.c.zeroFtSensor()
         yield from self.wait(FT_SETTLE, f"{label}: zeroing force sensor")
         start = np.asarray(self.r.getActualTCPPose()[:3])
@@ -808,8 +977,9 @@ class SequenceTask(Task):
         self.glass_xy = np.asarray(self.r.getActualTCPPose()[:2]) - self.tip_offset
 
     def turn(self, rotation, label, q_near=None, force=False, keep_turns=False):
-        """Turn the tool to rotation high up over the start position, away from the
-        glasses. With no turn to make, only up to carry height where the tool is.
+        """Turn the tool to rotation at carry height where the tool is (or over the
+        start position, TURN_OVER_START). With no turn to make, only up to carry
+        height where the tool is.
 
         The turn is a moveJ to the IK solution nearest q_near (the taught joints for
         that grip, else the joints at the start of the task), not a moveL: going round
@@ -831,11 +1001,18 @@ class SequenceTask(Task):
                 and (q_near is None or self.configuration_error(q_near) < np.radians(CONFIG_TOLERANCE_DEG))):
             yield from self.move_to(up, "up")
             return
-        start = self.start
-        safe_z = max(start[2], self.carry_z)
         q_near = self.start_q if q_near is None else q_near
-        yield from self.move_to([up[0], up[1], max(up[2], safe_z)], "up")
-        yield from self.move_to([start[0], start[1], safe_z], "over start position")
+        if TURN_OVER_START:
+            x, y = self.start[:2]
+            safe_z = max(self.start[2], self.carry_z)
+            yield from self.move_to([up[0], up[1], max(up[2], safe_z)], "up")
+            yield from self.move_to([x, y, safe_z], "over start position")
+        else:
+            # Where the tool is: the arc checks keep it above the glasses and clear of the arm
+            x, y = up[:2]
+            safe_z = self.carry_z
+            yield from self.move_to([x, y, max(up[2], safe_z)], "up")
+            safe_z = max(safe_z, self.r.getActualTCPPose()[2])
 
         # Raise the turn until the predicted arc stays up (from the joints the arm
         # will have up there: same orientation, nearest the joints now)
@@ -843,22 +1020,21 @@ class SequenceTask(Task):
         for _ in range(TURN_RAISE_TRIES):
             q_from = None
             if turn_z > safe_z:
-                q_from = self.ik([start[0], start[1], turn_z] + list(self.rotation), self.r.getActualQ())
-            q, lowest = self.turn_plan([start[0], start[1], turn_z] + list(rotation), q_near, q_from, keep_turns)
-            if lowest >= safe_z - TURN_MAX_DIP:
+                q_from = self.ik([x, y, turn_z] + list(self.rotation), self.r.getActualQ())
+            q, lowest = self.turn_plan([x, y, turn_z] + list(rotation), q_near, q_from, keep_turns)
+            if lowest >= self.turn_floor(safe_z):
                 break
-            turn_z += safe_z - TURN_MAX_DIP - lowest + TURN_RAISE_MARGIN
+            turn_z += self.turn_floor(safe_z) - lowest + TURN_RAISE_MARGIN
             if turn_z > MAX_TCP_Z:
                 raise TaskFailed(f"tool turn sags {(safe_z - lowest) * 1000:.0f} mm, no room to turn "
                                  f"above it under the ceiling (teach SIDE_GRIP_Q / TOP_GRIP_Q closer)")
         else:
             raise TaskFailed(f"tool turn sags to z {lowest:.3f} m even raised to {turn_z:.3f} m")
         if turn_z > safe_z:
-            yield from self.move_to([start[0], start[1], turn_z], "up to turn height")
+            yield from self.move_to([x, y, turn_z], "up to turn height")
             # Checked again from the joints the arm really has now
-            q, lowest = self.turn_plan([start[0], start[1], turn_z] + list(rotation), q_near,
-                                       keep_turns=keep_turns)
-            if lowest < safe_z - TURN_MAX_DIP:
+            q, lowest = self.turn_plan([x, y, turn_z] + list(rotation), q_near, keep_turns=keep_turns)
+            if lowest < self.turn_floor(safe_z):
                 raise TaskFailed(f"tool turn would sag to z {lowest:.3f} m, more than "
                                  f"{TURN_MAX_DIP * 1000:.0f} mm below the safe height {safe_z:.3f} m")
         self.move_j(q, TURN_SPEED, TURN_ACCEL)
@@ -893,10 +1069,10 @@ class SequenceTask(Task):
         reached = self.c.getForwardKinematics(q, self.c.getTCPOffset())
         if (np.linalg.norm(np.subtract(reached[:3], target[:3])) > TURN_IK_TOLERANCE
                 or rotation_angle(reached[3:], target[3:]) > np.radians(TURN_TOLERANCE_DEG)):
-            raise TaskFailed("no joint solution for the tool turn over the start position")
+            raise TaskFailed("no joint solution for the tool turn")
         return q
 
-    def turn_plan(self, target, q_near, q_from=None, keep_turns=False):
+    def turn_plan(self, target, q_near, q_from=None, keep_turns=False, zones=True):
         """(joints for target nearest q_near, lowest TCP z on the joint arc from q_from).
 
         q_from defaults to the joints now. Unless keep_turns, q_near is shifted by
@@ -918,13 +1094,15 @@ class SequenceTask(Task):
         near = joint_near_limit(q)
         if near is not None:
             raise TaskFailed(f"tool turn would take {near[0]} to {near[1]:.0f} deg, near its limit")
-        return q, self.arc_lowest(q0, q, "tool turn")
+        return q, self.arc_lowest(q0, q, "tool turn", zones)
 
-    def arc_lowest(self, q0, q1, label):
+    def arc_lowest(self, q0, q1, label, zones=True):
         """Lowest TCP z on a moveJ from q0 to q1 (joints in a line, the TCP on an arc).
         Refused when the gripper would come closer to the arm than any taught pose."""
         q0, q1 = np.asarray(q0, dtype=float), np.asarray(q1, dtype=float)
         self.check_self_gap([q0, q1], label)
+        if zones:
+            self.check_zones_joints([q0, q1], label)
         offset = self.c.getTCPOffset()
         z = [self.c.getForwardKinematics(list(q0 + t * (q1 - q0)), offset)[2]
              for t in np.linspace(0, 1, TURN_CHECK_STEPS + 1)[1:]]
@@ -961,7 +1139,7 @@ class SequenceTask(Task):
         self.check_configuration(TOP_GRIP_Q, "top grip")
         yield from self.move_to([x, y, top_z + APPROACH_GAP], "approach glass", speed=APPROACH_SPEED)
         yield from self.vacuum_on()
-        yield from self.push_down(top_z - MAX_OVERSHOOT, CONTACT_FORCE, "pick")
+        yield from self.push_down(top_z - TOP_PICK_OVERSHOOT, CONTACT_FORCE, "pick")
         yield from self.wait_for_grip([[x, y, self.carry_z]])
         self.gripped("top", TOP_GRIP_OFFSET)
         tcp = self.r.getActualTCPPose()
@@ -1019,28 +1197,63 @@ class SequenceTask(Task):
         yield from self.move_to([tcp[0], tcp[1], self.carry_z], "down to carry height", holding=True)
 
     # --- stations: taught poses the held glass is taken to (spray, dry) -------------
-    def to_station(self, pose, q_ref, approach, name):
-        """Take the held glass to a taught station pose: joint move (in the taught arm
-        configuration q_ref, arc checked) to pose + approach, then straight in.
-        Stations chain: from one straight to the next; back to the joints before the
-        first one only before a step that is not a station (leave_stations)."""
-        if self.station_return_q is None:
-            self.station_return_q = self.r.getActualQ()
-        entry = list(np.add(pose[:3], approach)) + list(pose[3:])
-        # Joint move with the glass held: the TCP arc must keep the glass over the others
-        q_entry, lowest = self.turn_plan(entry, q_ref)
-        if lowest < self.carry_z - TURN_MAX_DIP:
+    def station_floor(self, z0, z1):
+        """Lowest TCP z allowed on a joint move with the glass held between heights z0 and
+        z1: carry height (the glass over the others), or lower when a taught station
+        is, minus TURN_MAX_DIP (the arc may sag a little, not below both ends)."""
+        return min(self.carry_z, z0, z1) - TURN_MAX_DIP
+
+    def station_plan(self, entry, q_ref, name, keep_turns=False):
+        """Joints for a station entry from where the arm is: the TCP arc must keep the
+        glass over the others and the gripper clear of the arm (TaskFailed if not).
+        keep_turns: arrive with q_ref's own angles, not shifted by whole turns."""
+        q_entry, lowest = self.turn_plan(entry, q_ref, keep_turns=keep_turns, zones=False)  # devices in the zones
+        if lowest < self.station_floor(self.r.getActualTCPPose()[2], entry[2]):
             raise TaskFailed(f"move to the {name} would sag to z {lowest:.3f} m "
                              f"(lengthen its approach or teach its joints closer)")
+        return q_entry
+
+    def to_station(self, pose, q_ref, approach, name, keep_turns=False):
+        """Take the held glass to a taught station pose: joint move (in the taught arm
+        configuration q_ref, arc checked) to pose + approach, then straight in.
+        From another station straight there when the checks pass, otherwise back
+        through the joints the arm had before the first station (the direct sprayer ->
+        dryer move swung the gripper 94 mm into the arm in the model); leave_stations()
+        also takes it back there before any other step."""
+        entry = list(np.add(pose[:3], approach)) + list(pose[3:])
+        q_entry = None
+        if self.station_return_q is not None:
+            try:
+                q_entry = self.station_plan(entry, q_ref, name, keep_turns)
+            except TaskFailed as e:
+                print(f"{e}: going back through the joints after the pick instead")
+                return_q = self.station_return_q
+                yield from self.leave_stations()
+                self.station_return_q = return_q
+        else:
+            self.station_return_q = self.r.getActualQ()
+        if q_entry is None:
+            q_entry = self.station_plan(entry, q_ref, name, keep_turns)
         self.move_j(q_entry, SPRAY_MOVE_SPEED, SPRAY_MOVE_ACCEL)
         yield from self.watch_grip(self.wait_move(f"to the {name}"), self.c.stopJ)
-        yield from self.move_to(pose[:3], f"into the {name} pose", holding=True,
+        yield from self.move_to(pose[:3], f"into the {name} pose", holding=True, station=True,
                                 rotation=pose[3:], speed=APPROACH_SPEED)
         self.station_exit = entry
 
     def out_of_station(self, name):
-        exit_pose = self.station_exit
-        yield from self.move_to(exit_pose[:3], f"out of the {name} pose", holding=True, rotation=exit_pose[3:])
+        """Back out the way it came in, then straight up to the traverse plane before
+        anything else (from the low sprayer the next joint move swept along at 146 mm)."""
+        # In the orientation the tool has now: the drying turns are about the tool z
+        # axis, so the way out is the same line, and a straight move back to the entry
+        # orientation would have to undo up to 180 deg (no defined direction)
+        rotation = list(self.r.getActualTCPPose()[3:])
+        exit_pose = list(self.station_exit[:3]) + rotation
+        yield from self.move_to(exit_pose[:3], f"out of the {name} pose", holding=True,
+                                rotation=rotation, station=True)
+        if exit_pose[2] < self.traverse_z:
+            yield from self.move_to([exit_pose[0], exit_pose[1], self.traverse_z], f"up from the {name}",
+                                    holding=True, rotation=exit_pose[3:], station=True)
+            self.station_exit = [exit_pose[0], exit_pose[1], self.traverse_z] + list(exit_pose[3:])
 
     def leave_stations(self):
         """Back to the joints before the first station, where the glass hangs as picked
@@ -1048,8 +1261,9 @@ class SequenceTask(Task):
         if self.station_return_q is None:
             return
         back_q = self.station_return_q
-        lowest = self.arc_lowest(self.r.getActualQ(), back_q, "move back from the stations")
-        if lowest < self.carry_z - TURN_MAX_DIP:
+        lowest = self.arc_lowest(self.r.getActualQ(), back_q, "move back from the stations", zones=False)
+        back_z = self.c.getForwardKinematics(list(back_q), self.c.getTCPOffset())[2]
+        if lowest < self.station_floor(self.r.getActualTCPPose()[2], back_z):
             raise TaskFailed(f"move back from the stations would sag to z {lowest:.3f} m")
         self.move_j(list(back_q), SPRAY_MOVE_SPEED, SPRAY_MOVE_ACCEL)
         yield from self.watch_grip(self.wait_move("back from the stations"), self.c.stopJ)
@@ -1058,6 +1272,12 @@ class SequenceTask(Task):
     def step_spray(self):
         """Hold the glass in the taught SPRAY_POSE and work the sprayer."""
         yield from self.to_station(SPRAY_POSE, SPRAY_Q, SPRAY_APPROACH, "sprayer")
+        # A burst from the y / Back button still going: Sprayer.start() would block
+        # the loop until it ends (watchdog), so let it end here
+        if self.sprayer.running:
+            self.sprayer.request_stop()
+            while self.sprayer.running:
+                yield "waiting for the manual spray to end"
         self.sprayer.start(period=SPRAY_PERIOD, count=SPRAY_STROKES)
         try:
             end = time.time() + SPRAY_TIMEOUT
@@ -1074,25 +1294,47 @@ class SequenceTask(Task):
             self.sprayer.request_stop()
         yield from self.out_of_station("sprayer")
 
+    def step_sponge(self):
+        """Hold the glass on the sponge (SPONGE_POSE, from above) and turn the sponge
+        SPONGE_SPIN_TIME each way. The servo is stopped on the way out, also on s /
+        abort / failure; the glass stays held."""
+        yield from self.to_station(SPONGE_POSE, SPONGE_Q, SPONGE_APPROACH, "sponge")
+        servo_errors = (TimeoutError, bus_servos.ServoError, SerialException)
+        try:
+            for direction, name in ((1, "one way"), (-1, "the other way")):
+                self.sponge.spin(direction * SPONGE_SPEED)
+                end = time.time() + SPONGE_SPIN_TIME
+                while time.time() < end:
+                    if self.suction.grip_result() == "LOST":
+                        raise TaskFailed("glass lost on the sponge (vacuum still on, r to release)")
+                    yield f"sponge turning {name}, {end - time.time():.0f} s"
+        except servo_errors as e:
+            raise TaskFailed(f"sponge servo not answering ({e}), glass still held")
+        finally:
+            try:
+                self.sponge.stop()
+            except servo_errors:
+                pass
+        yield from self.out_of_station("sponge")
+
     def step_dry(self):
         """Hold the glass in the taught DRY_POSE, coming in along the tool z axis, and
-        swing it about that axis (wrist 3: the TCP stays, the glass turns about its own
-        axis with the top grip) DRY_ANGLE_DEG each way, DRY_SWINGS times."""
+        turn it about that axis (wrist 3: the TCP stays, the glass turns about its own
+        axis with the top grip) to each angle of DRY_TURNS_DEG."""
         tool_z = cv2.Rodrigues(np.asarray(DRY_POSE[3:], dtype=float))[0][:, 2]
-        yield from self.to_station(DRY_POSE, DRY_Q, -DRY_APPROACH * tool_z, "drying")
-        center = list(self.r.getActualQ())
-        swing = DRY_FIRST_DIRECTION * np.radians(DRY_ANGLE_DEG)
-        for extreme in (center[5] + swing, center[5] - swing):
-            q = center[:5] + [extreme]
+        pose = list(np.add(DRY_POSE[:3], DRY_DEPTH * tool_z)) + list(DRY_POSE[3:])
+        # With DRY_Q's own angles (wrist 3 -143 deg), so the turns always end the same
+        # (+180 -> +37 deg); arriving a turn wound, +180 would run into the joint limit
+        yield from self.to_station(pose, DRY_Q, -DRY_APPROACH * tool_z, "drying", keep_turns=True)
+        arrived = list(self.r.getActualQ())
+        targets = [arrived[:5] + [arrived[5] + np.radians(angle)] for angle in DRY_TURNS_DEG]
+        for q in targets:
             near = joint_near_limit(q)
             if near is not None:
-                raise TaskFailed(f"drying swing would take {near[0]} to {near[1]:.0f} deg, near its limit")
-        for i in range(DRY_SWINGS):
-            for extreme in (center[5] + swing, center[5] - swing):
-                self.move_j(center[:5] + [extreme], DRY_SPEED, DRY_ACCEL)
-                yield from self.watch_grip(self.wait_move(f"drying, swing {i + 1}/{DRY_SWINGS}"), self.c.stopJ)
-        self.move_j(center, DRY_SPEED, DRY_ACCEL)
-        yield from self.watch_grip(self.wait_move("drying done"), self.c.stopJ)
+                raise TaskFailed(f"drying turn would take {near[0]} to {near[1]:.0f} deg, near its limit")
+        for i, q in enumerate(targets, 1):
+            self.move_j(q, DRY_SPEED, DRY_ACCEL)
+            yield from self.watch_grip(self.wait_move(f"drying, turn {i}/{len(targets)}"), self.c.stopJ)
         yield from self.out_of_station("drying")
 
     def step_set_down(self):
@@ -1102,6 +1344,9 @@ class SequenceTask(Task):
     def step_place(self):
         """Put the held glass down on the place tag."""
         yield from self.put_down(self.place_xy, "tag")
+        # The tag is taken from here on, even if the way back fails or is aborted
+        if self.on_placed is not None:
+            self.on_placed()
 
     # --- the whole task -----------------------------------------------------------------
     def check_start(self):
@@ -1109,8 +1354,8 @@ class SequenceTask(Task):
         check_sequence(self.sequence)
         # Joint moves may come as close to the arm as the closest pose taught by hand
         T_tool = system_arm.pose_matrix(self.c.getTCPOffset())
-        taught = [self.start_q] + [q for q in (SIDE_GRIP_Q, TOP_GRIP_Q, SPRAY_Q, START_Q) if q is not None]
-        self.min_self_gap = min(self_gap(q, T_tool) for q in taught) - SELF_GAP_MARGIN
+        taught = [self.start_q] + [q for q in (SIDE_GRIP_Q, TOP_GRIP_Q, SPRAY_Q, DRY_Q, START_Q) if q is not None]
+        self.min_self_gap = min(SELF_GAP_PROVEN, *(self_gap(q, T_tool) for q in taught)) - SELF_GAP_MARGIN
         if "pick_top" in self.sequence:
             # Taught, else the start orientation if it points down (as before), else home
             candidates = ([TOP_GRIP_ROTATION] if TOP_GRIP_ROTATION is not None else
@@ -1122,6 +1367,8 @@ class SequenceTask(Task):
             else:
                 source = "TOP_GRIP_ROTATION" if TOP_GRIP_ROTATION is not None else "START_Q"
                 raise TaskFailed(f"{source} does not point the tool down, can't pick from the top")
+        if "sponge" in self.sequence and self.sponge is None:
+            raise TaskFailed(f"SEQUENCE sponges, but the sponge servo on {SPRAYER_PORT} is not connected")
         if "spray" in self.sequence and self.sprayer is None:
             raise TaskFailed(f"SEQUENCE sprays, but the sprayer on {SPRAYER_PORT} is not connected")
         if "flip" in self.sequence or "dry" in self.sequence:
@@ -1176,17 +1423,18 @@ class SequenceTask(Task):
         tcp = self.r.getActualTCPPose()
         yield from self.move_to([tcp[0], tcp[1], max(tcp[2], safe_z)], "up to unwind")
         waypoints, lowest, highest = plan()
-        if lowest < safe_z - TURN_MAX_DIP:
-            rise = safe_z - TURN_MAX_DIP - lowest + TURN_RAISE_MARGIN
+        if lowest < self.turn_floor(safe_z):
+            rise = self.turn_floor(safe_z) - lowest + TURN_RAISE_MARGIN
             if highest + rise > MAX_TCP_Z:
                 raise TaskFailed(f"unwinding swings the TCP {(highest - lowest) * 1000:.0f} mm up and down, "
                                  f"no room under the ceiling; unwind on the pendant")
             tcp = self.r.getActualTCPPose()
             yield from self.move_to([tcp[0], tcp[1], tcp[2] + rise], "up to unwind")
             waypoints, lowest, highest = plan()
-            if lowest < safe_z - TURN_MAX_DIP:
+            if lowest < self.turn_floor(safe_z):
                 raise TaskFailed(f"unwinding would sag to z {lowest:.3f} m, not moving")
         self.check_self_gap(waypoints, "unwinding")
+        self.check_zones_joints(waypoints, "unwinding")
         names = ", ".join(f"{JOINT_NAMES[i]} {np.degrees(waypoints[0][i]):.0f} -> "
                           f"{np.degrees(waypoints[-1][i]):.0f} deg"
                           for i in (3, 4, 5) if abs(waypoints[-1][i] - waypoints[0][i]) > 1)
@@ -1198,7 +1446,7 @@ class SequenceTask(Task):
         self.rotation = list(self.r.getActualTCPPose()[3:])
 
     def run(self):
-        # Any start orientation: each pick turns the tool over the start position if it
+        # Any start orientation: each pick turns the tool if it
         # needs another one, and it turns back to the start orientation at the end
         self.start = self.r.getActualTCPPose()
         self.start_q = self.r.getActualQ()        # every tool turn ends near these joints
@@ -1224,54 +1472,97 @@ class SequenceTask(Task):
         self.status = "done"
 
 
-def connect_sprayer():
-    """(ServoBus, Sprayer) on SPRAYER_PORT, or (None, None) with a warning when SEQUENCE
-    doesn't spray or the board / servo doesn't answer (p is then refused)."""
-    if "spray" not in SEQUENCE:
-        return None, None
+def connect_servos():
+    """(ServoBus, Sprayer, sponge BusServo) on SPRAYER_PORT; None for what SEQUENCE does not
+    use or does not answer (with a warning: p is then refused, y needs the sprayer)."""
+    if not {"spray", "sponge"} & set(SEQUENCE):
+        return None, None, None
     try:
         bus = bus_servos.ServoBus(SPRAYER_PORT)
     except SerialException as e:
-        warn(f"sprayer board on {SPRAYER_PORT} not available ({e}), p will be refused")
-        return None, None
-    servo = bus_servos.BusServo(bus, bus_servos.SPRAYER_ID)
-    if not servo.ping():
-        bus.close()
-        warn(f"sprayer servo {bus_servos.SPRAYER_ID} on {SPRAYER_PORT} not answering, p will be refused")
-        return None, None
-    return bus, bus_servos.Sprayer(servo)
+        warn(f"servo board on {SPRAYER_PORT} not available ({e}), p will be refused")
+        return None, None, None
+    servos = {}
+    for step, servo_id, name in (("spray", bus_servos.SPRAYER_ID, "sprayer"),
+                                 ("sponge", bus_servos.ROTATOR_ID, "sponge")):
+        servo = bus_servos.BusServo(bus, servo_id)
+        if servo.ping():
+            servos[step] = servo
+        elif step in SEQUENCE:
+            warn(f"{name} servo {servo_id} on {SPRAYER_PORT} not answering, p will be refused")
+    sprayer = bus_servos.Sprayer(servos["spray"]) if "spray" in servos else None
+    return bus, sprayer, servos.get("sponge")
 
 
-def find_place_tag(detector, finder, image):
-    """(base x, y of the place tag's center on the table, its id, all ids in view), or None."""
-    centers = fg.tag_centers(detector, image)
-    ids = [PLACE_TAG_ID] if PLACE_TAG_ID is not None else sorted(centers)
-    for tag_id in ids:
-        if tag_id in centers:
-            p = fg.pixel_to_plane(finder.K, finder.T_base_cam, centers[tag_id], finder.table_z)
-            if p is not None:
-                return p[:2], tag_id, sorted(centers)
+def spray_command(sprayer, task):
+    """y / Back: a burst of MANUAL_SPRAY_STROKES, or stop the one running. Refused while
+    a task runs (it works the sprayer itself) or without the sprayer. Never blocks."""
+    if sprayer is None:
+        return warn(f"no sprayer on {SPRAYER_PORT}, y ignored")
+    if task is not None:
+        return warn("task running, y ignored (s stops the task)")
+    if sprayer.running:
+        sprayer.request_stop()
+        return "spray stopping after this stroke"
+    if sprayer.error is not None:
+        warn(f"last spray failed ({sprayer.error}), trying again")
+    sprayer.start(period=SPRAY_PERIOD, count=MANUAL_SPRAY_STROKES)
+    return f"spraying {MANUAL_SPRAY_STROKES} strokes (y / Back again stops)"
+
+
+def find_place_tags(detector, finder, image):
+    """{id: base x, y of its center on the table} for the place tags in view."""
+    tags = {}
+    for tag_id, pixel in fg.tag_centers(detector, image).items():
+        if PLACE_TAG_IDS is not None and tag_id not in PLACE_TAG_IDS:
+            continue
+        p = fg.pixel_to_plane(finder.K, finder.T_base_cam, pixel, finder.table_z)
+        if p is not None:
+            tags[tag_id] = np.asarray(p[:2])
+    return tags
+
+
+def on_tag(glass, xy):
+    return np.hypot(glass.x - xy[0], glass.y - xy[1]) <= PLACED_RADIUS
+
+
+def next_place_tag(tags, used, glasses):
+    """Id of the tag to put the next glass on: the first (by id, or PLACE_TAG_IDS order)
+    not used this round and with no glass standing on it; None when all are taken."""
+    order = PLACE_TAG_IDS if PLACE_TAG_IDS is not None else sorted(tags)
+    for tag_id in order:
+        if tag_id in tags and tag_id not in used and not any(on_tag(g, tags[tag_id]) for g in glasses):
+            return tag_id
     return None
 
 
-def choose_glass(glasses, place_xy):
-    free = [g for g in glasses if np.hypot(g.x - place_xy[0], g.y - place_xy[1]) > PLACED_RADIUS]
+def choose_glass(glasses, tags):
+    """The glass closest to the robot base (horizontal distance from its axis), skipping
+    glasses standing on a place tag (done already)."""
+    free = [g for g in glasses if not any(on_tag(g, xy) for xy in tags.values())]
     if len(free) < len(glasses):
-        print("(skipping the glass already standing on the tag)")
-    return min(free, key=lambda g: np.hypot(g.x - place_xy[0], g.y - place_xy[1]), default=None)
+        print(f"(skipping {len(glasses) - len(free)} glass(es) standing on a place tag)")
+    return min(free, key=lambda g: np.hypot(g.x, g.y), default=None)
 
 
-def draw_place(image, finder, place_xy, tag_id, seen):
+def draw_places(image, finder, tags, seen, used, next_id):
+    """Every known place tag: the next one bright cyan, used ones gray, others dark cyan."""
     T_cam_base = np.linalg.inv(finder.T_base_cam)
     rvec, _ = cv2.Rodrigues(T_cam_base[:3, :3])
-    point = np.array([[place_xy[0], place_xy[1], finder.table_z]])
-    pixel, _ = cv2.projectPoints(point, rvec, T_cam_base[:3, 3], finder.K, None)
-    p = tuple(int(v) for v in pixel.ravel())
-    color = (255, 255, 0) if seen else (160, 160, 0)
-    cv2.drawMarker(image, p, color, cv2.MARKER_SQUARE, 30, 2)
-    label = f"place: tag {tag_id}" + ("" if seen else " (last seen)")
-    cv2.putText(image, label, (p[0] + 18, p[1] + 5),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    for tag_id, xy in tags.items():
+        point = np.array([[xy[0], xy[1], finder.table_z]])
+        pixel, _ = cv2.projectPoints(point, rvec, T_cam_base[:3, 3], finder.K, None)
+        p = tuple(int(v) for v in pixel.ravel())
+        if tag_id == next_id:
+            color, label = (255, 255, 0), f"tag {tag_id}: next"
+        elif tag_id in used:
+            color, label = (140, 140, 140), f"tag {tag_id}: used"
+        else:
+            color, label = (160, 160, 0), f"tag {tag_id}"
+        if tag_id not in seen:
+            label += " (last seen)"
+        cv2.drawMarker(image, p, color, cv2.MARKER_SQUARE, 30, 2)
+        cv2.putText(image, label, (p[0] + 18, p[1] + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
 
 def main():
@@ -1284,17 +1575,19 @@ def main():
     fg.setup_window(editor)
 
     suction = connect_suction()
-    servo_bus, sprayer = connect_sprayer()
+    servo_bus, sprayer, sponge = connect_servos()
     r, c = safe_motion.connect(IP)
     gamepad = GamepadControl(GAMEPAD_KEYS)
     jogger = Jogger(c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
     print("Connected to robot. TCP pose:", r.getActualTCPPose())
 
     task = None
-    place_xy = None
-    place_id = None
-    tags_in_view = []
-    status = "p: pick & place  s: stop  g/r: grip/release  h: home  q: quit"
+    tags = {}                        # place tag id -> last seen base x, y
+    seen_tags = {}
+    used_tags = set()                # glass put on it this round (c clears)
+    status = "p: pick & place  s: stop  g/r: grip/release  h: home  f: freedrive  q: quit"
+    freedrive = False
+    zone_corner = None               # first corner taught with b
     last_frame = None
     image = None
     glasses = []
@@ -1316,15 +1609,14 @@ def main():
                         task.abort()
                         task = None
                     jogger.stop()
+                    freedrive = False       # the re-uploaded control script is not in teach mode
                     status = "robot was stopped (loop stall / protective stop), task aborted"
-                seen = None
                 if new_frame and task is None:
                     # Only between tasks (~40 ms): during one the glass is chosen and the
                     # tag position kept, and the robot steps run at LOOP_PERIOD instead
                     glasses = finder.detect(image)
-                    seen = find_place_tag(detector, finder, image)
-                    if seen is not None:
-                        place_xy, place_id, tags_in_view = seen
+                    seen_tags = find_place_tags(detector, finder, image)
+                    tags.update(seen_tags)
                 tcp = r.getActualTCPPose()
 
                 pick_now = False             # p pressed at the start, or the start reached after p
@@ -1341,9 +1633,11 @@ def main():
                     status = warn(f"above the {MAX_TCP_Z:.2f} m ceiling, task stopped (jog down)")
 
                 if new_frame:
-                    fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2], place_xy)
-                    if place_xy is not None:
-                        draw_place(image, finder, place_xy, place_id, seen is not None)
+                    next_id = next_place_tag(tags, used_tags, glasses)
+                    fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2],
+                                    tags[next_id] if next_id is not None else None)
+                    draw_places(image, finder, tags, seen_tags if task is None else {}, used_tags, next_id)
+                    draw_zones(image, finder)
                     cv2.imshow(fg.WINDOW, image)
 
                 if gamepad.jog_speed() is not None and task is not None:
@@ -1351,7 +1645,7 @@ def main():
                     task = None
                     status = "manual override, task aborted"
                     print(status)
-                if task is None:
+                if task is None and not freedrive:
                     jogger.update(tcp)
 
                 keys = fg.read_keys(gamepad)
@@ -1362,14 +1656,53 @@ def main():
                         if task is not None:
                             task.abort()
                             task = None
+                        if freedrive:
+                            c.endTeachMode()
+                            freedrive = False
                         jogger.stop()
                         c.speedStop(STOP_DECEL)
                         status = "stopped"
+                    elif key == "f":
+                        if task is not None:
+                            status = warn("task running, f ignored (s stops the task)")
+                        elif freedrive:
+                            c.endTeachMode()
+                            freedrive = False
+                            status = "freedrive off"
+                        else:
+                            jogger.stop()
+                            c.teachMode()
+                            freedrive = True
+                            status = "FREEDRIVE: move the arm by hand (f / right stick click ends it)"
+                        print(status)
+                    elif key in ("h", "p") and freedrive:
+                        status = warn(f"freedrive on, {key} ignored (f / right stick click ends it)")
                     elif key == "g" and task is not None:
                         # The pick task controls the vacuum and waits for its GRIP result
                         status = warn("task running, g ignored (s stops the task)")
                     elif key in ("g", "r"):
                         status = key_command(suction, key)
+                    elif key == "c":
+                        used_tags.clear()
+                        status = "place tags cleared, the next p starts with the first tag again"
+                        print(status)
+                    elif key == "b":
+                        # Two opposite corners of an exclusion box, at the TCP
+                        tip = [round(v, 3) for v in r.getActualTCPPose()[:3]]
+                        if zone_corner is None:
+                            zone_corner = tip
+                            status = f"zone corner 1 at {tip}: move the tip to the opposite corner, b again"
+                        else:
+                            lo = [min(a, b) for a, b in zip(zone_corner, tip)]
+                            hi = [max(a, b) for a, b in zip(zone_corner, tip)]
+                            print(f"EXCLUSION_ZONES = [({lo}, {hi})]   # add to the list, "
+                                  f"{(hi[0] - lo[0]) * 1000:.0f} x {(hi[1] - lo[1]) * 1000:.0f} x "
+                                  f"{(hi[2] - lo[2]) * 1000:.0f} mm")
+                            zone_corner = None
+                            status = "zone printed in the console, paste it into EXCLUSION_ZONES"
+                        print(status)
+                    elif key == "y":
+                        status = spray_command(sprayer, task)
                     elif key == "o":
                         pose = r.getActualTCPPose()
                         rotation = ", ".join(f"{v:.5f}" for v in pose[3:])
@@ -1405,20 +1738,24 @@ def main():
                             task = HomeTask(r, c, then_pick=True)
 
                 if pick_now and task is None:
-                    if place_xy is None:
-                        status = warn(f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} "
-                                      "in view, p ignored")
+                    if not tags:
+                        status = warn("no place tag in view, p ignored")
                         continue
-                    if PLACE_TAG_ID is None and len(tags_in_view) > 1:
-                        # Not refused: the id of the place tag is not fixed, so the lowest wins
-                        warn(f"tags {tags_in_view} in view, placing on the lowest id {place_id}")
                     status = "measuring..."
-                    glass = choose_glass(finder.measure(grabber, kick=watchdog.kick), place_xy)
-                    if glass is None:
-                        status = warn("no glass found, p ignored")
+                    measured = finder.measure(grabber, kick=watchdog.kick)
+                    tag_id = next_place_tag(tags, used_tags, measured)
+                    if tag_id is None:
+                        status = warn(f"all place tags {sorted(tags)} used, p ignored (c clears them)")
                         continue
-                    task = SequenceTask(r, c, suction, glass, place_xy,
-                                        finder.table_z, GLASS_HEIGHT, sprayer=sprayer)
+                    glass = choose_glass(measured, tags)
+                    if glass is None:
+                        status = warn("no glass to pick (none found, or all on place tags), p ignored")
+                        continue
+                    print(f"Glass at {glass.x * 1000:.0f}, {glass.y * 1000:.0f} mm "
+                          f"({np.hypot(glass.x, glass.y) * 1000:.0f} mm from the base) -> tag {tag_id}")
+                    task = SequenceTask(r, c, suction, glass, tags[tag_id], finder.table_z, GLASS_HEIGHT,
+                                        sprayer=sprayer, sponge=sponge,
+                                        on_placed=lambda tag_id=tag_id: used_tags.add(tag_id))
                 # Pace the loop: steps well under SPEED_CMD_TIME apart keep a speedL push
                 # continuous, without spinning the CPU between camera frames
                 time.sleep(max(0.0, LOOP_PERIOD - (time.time() - loop_start)))
@@ -1429,6 +1766,12 @@ def main():
                 status = warn(f"error: {e} - stopped, recovering")
                 task = None
                 recover(r, c, watchdog)
+                if freedrive:
+                    try:
+                        c.endTeachMode()
+                    except Exception:
+                        pass
+                    freedrive = False
                 time.sleep(ERROR_RETRY_DELAY)
                 if cv2.waitKey(1) & 0xFF in (ord("q"), 27):   # keep the window alive, allow quit
                     break
@@ -1438,6 +1781,8 @@ def main():
         try:
             if task is not None:
                 task.abort()
+            if freedrive:
+                c.endTeachMode()
             c.speedStop(STOP_DECEL)
             c.stopScript()
         except Exception:
@@ -1446,6 +1791,12 @@ def main():
         suction.close()
         if sprayer is not None:
             sprayer.stop()           # robot already stopped, so waiting for the stroke is fine
+        if sponge is not None:
+            try:
+                sponge.stop()
+            except Exception:
+                pass
+        if servo_bus is not None:
             servo_bus.close()
         grabber.close()
         cv2.destroyAllWindows()
