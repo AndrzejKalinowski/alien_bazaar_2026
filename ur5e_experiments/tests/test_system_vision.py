@@ -80,3 +80,55 @@ def test_simulated_robot_can_use_an_external_scene():
     assert devices._present("glass-7") and not devices._present("glass-1")
     with pytest.raises(ValueError):
         devices.add_targets(1)
+
+
+# --- camera process (spawned; fake cameras, no OpenCV) --------------------------
+
+def wait_for(predicate, timeout=10.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_camera_process_delivers_scenes_and_frames():
+    import fake_camera
+    from system_vision import CameraVision
+    from system_web import FrameHub
+    frames = FrameHub()
+    vision = CameraVision(frames, target=fake_camera.good_camera)
+    vision.start()
+    try:
+        assert wait_for(lambda: frames.latest() is not None)
+        scene = vision.observe(0.0)
+        assert scene.targets == (GlassTarget("glass-1", 0.4, -0.3),)
+        assert scene.window_start < scene.observed_at
+        first = scene.sequence
+        assert wait_for(lambda: vision.observe(0.0).sequence > first)
+    finally:
+        vision.close()
+    assert not vision.alive
+
+
+def test_camera_that_cannot_open_fails_start():
+    import fake_camera
+    from system_vision import CameraVision
+    vision = CameraVision(target=fake_camera.broken_camera)
+    with pytest.raises(RuntimeError, match="Could not open camera"):
+        vision.start()
+    assert not vision.alive
+
+
+def test_dead_camera_process_is_reported_and_scenes_stop():
+    import fake_camera
+    from system_vision import CameraVision
+    vision = CameraVision(target=fake_camera.short_lived_camera)
+    vision.start()
+    try:
+        assert wait_for(lambda: vision.error == "camera process ended")
+        assert vision.observe(0.0).sequence == 1   # last scene only; it will go stale
+    finally:
+        vision.close()

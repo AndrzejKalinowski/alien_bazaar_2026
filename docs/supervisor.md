@@ -110,7 +110,12 @@ kamery, rozdzielczość i obszar detekcji (`detection_area.json`) pochodzą
 z `find_glasses.py`. Obszar musi obejmować tylko strefę wejściową, bez
 stanowisk i tagów odbioru. Szklanki muszą stać otworem do góry.
 
-`system_vision.py` czyta klatki we własnym wątku. Z klatek w oknie 0,3 s
+`system_vision.py` uruchamia kamerę w **osobnym procesie** (`multiprocessing`,
+`spawn`). Proces kamery otwiera kamerę i kalibrację, wykrywa szklanki i przez
+potok wysyła tylko gotowe pomiary i podgląd JPEG, więc przetwarzanie obrazu
+nie konkuruje z pętlą sterowania o GIL. Błąd otwarcia kamery przerywa start
+programu. Gdy proces kamery zginie, pomiar się zestarzeje, a nadzorca
+zatrzyma partię. Kamera Z klatek w oknie 0,3 s
 tworzy jeden pomiar: szklanka musi być wykryta w co najmniej połowie
 klatek okna. Mniej niż 5 klatek w oknie nie daje pomiaru; obraz staje się
 nieaktualny, a nadzorca zatrzymuje partię. Dzięki temu trzy kolejne pomiary
@@ -397,6 +402,12 @@ anulowanie sprysku i niepotwierdzone zatrzymanie.
 
 Etap 3 w części offline jest zrobiony. Pozostaje praca przy robocie
 (lista wyżej), potem etapy 4–7 [planu](system_supervisor_plan.md).
-Otwarte punkty: próba `--camera` na stole; osobne procesy dla kamery
-i panelu; pomiar promieni członów i przesunięcia barku. Nowe uruchomienie symulatora tworzy nowy fikcyjny świat;
+Panel pozostaje w procesie nadzorcy, w wątkach. Serwer HTTP głównie czeka
+na sieć. Zmierzony najdłuższy takt pętli przy 8 otwartych strumieniach SSE
+i pełnej partii w symulacji wyniósł 7,8 ms, wobec okresu 20 ms i 200 ms
+watchdoga. Pomiar trzeba powtórzyć na docelowym laptopie z kamerą; status
+pokazuje go jako `loop.max_tick`.
+
+Otwarte punkty: próba `--camera` na stole; pomiar promieni członów
+i przesunięcia barku; pomiar czasów pętli na docelowym laptopie. Nowe uruchomienie symulatora tworzy nowy fikcyjny świat;
 dziennik nie służy do automatycznego wznawiania ruchu.
