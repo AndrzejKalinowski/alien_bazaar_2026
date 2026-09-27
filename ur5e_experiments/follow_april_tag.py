@@ -613,7 +613,7 @@ def main():
     status = "ready"
     stamp = 0.0
 
-    watchdog = RobotWatchdog(c)
+    watchdog = RobotWatchdog(c, r)
     try:
         while True:
             frame, stamp = camera.read(newer_than=stamp)

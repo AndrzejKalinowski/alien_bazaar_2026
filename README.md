@@ -285,13 +285,13 @@ Needs: the overhead calibration (steps 1, 3 and 4), the suction gripper on `COM9
 
 Press **p / Y** to run one full cycle:
 
+0. Only with `GO_TO_START_FIRST = True` (off for now): if the arm is not at `START_Q` (the **h** position), move there first; the cycle starts when it arrives.
 1. Measure the glasses (median over 15 frames) and the place tag. The last seen tag position is kept, because the placed glass covers the tag.
 2. Choose the free glass **closest to the tag** (glasses within 4 cm of the tag count as already placed).
-3. Go up to the carry height, over the glass, then down to 2 cm above the foot. Turn the vacuum on and descend at 15 mm/s until the force is **> 10 N** (or 15 mm past the expected height). Wait for `GRIP OK` (at most 6 s; otherwise release and back off).
-4. Lift, carry over the tag (watching for `GRIP LOST`), lower, descend until **> 8 N**, release and wait 1.7 s.
-5. Go back up and return to the start pose, out of the camera's view.
+3. Run the steps in `SEQUENCE` on it. The default **flips the glass**: `pick_side` (grab the wall with the tool horizontal), `flip` (lift clear and turn wrist 3 by 180°, so the glass turns upside down in place), `set_down` (put it down where it was, release), `pick_top` (grab it from the top, tool pointing down), `spray` (hold it in the taught `SPRAY_POSE` in front of the sprayer and do `SPRAY_STROKES` pump strokes with the bus servo on `SPRAYER_PORT`), `place` (put it on the tag, release). Without the sprayer board connected, **p** is refused while `SEQUENCE` contains `spray`. `["pick_side", "place"]` or `["pick_top", "place"]` is the plain pick & place. Each pick waits for `GRIP OK` (at most 6 s; otherwise release and back off), each move with a glass held watches for `GRIP LOST`, each put-down descends slowly until **> 8 N** and waits 1.7 s for the release.
+4. Go back up and return to the start pose, out of the camera's view.
 
-The tool keeps the orientation it had at the start, which **must be within 10° of pointing down**. Press **h / Start** (home) first if needed. Touching any stick during a task **aborts it** (manual override).
+`SEQUENCE` is checked before anything moves: steps that don't fit together (a flip without a side grip, a pick with a glass held, a glass still held at the end) are refused. Tool turns (sideways, pointing down) happen high up over the start position, so the start orientation can be anything. For `pick_top` the tool points down in the start orientation if that is within 10° of down, otherwise in the `START_Q` orientation. The flip needs a TCP offset without x/y on the pendant. Touching any stick during a task **aborts it** (manual override). To add a step, see the docstring of `pick_place_glasses.py`.
 
 Without the gripper connected, the script prints a warning and uses `NoSuction`. The motion runs and "grip" is assumed successful. This is handy for dry runs.
 
@@ -368,7 +368,7 @@ Keyboard keys work when the OpenCV video window has focus. Gamepad buttons use X
 | Other | – | – | **t / B** tip → area corner, **u** undo, **x** clear area | **n / X** skip, **f / B** freedrive, **c / Y** solve |
 | Quit | **q / Esc** | **q / Esc** | **q / Esc** | **q / Esc** |
 
-Home is `HOME_Q = [0, -1.57, 1.57, -1.57, -1.57, 0]` (tool pointing down).
+Home is `HOME_Q = [0, -1.57, 1.57, -1.57, -1.57, 0]` (tool pointing down), except in `pick_place_glasses`: there **h** goes to its taught `START_Q` (tool pointing down, out of the camera's view), and with `GO_TO_START_FIRST = True` **p** goes there first when the arm is elsewhere.
 
 A key that can't be carried out right now is **refused with a `WARNING`** in the console and the video window, and the program keeps running. Examples: **g** during the 1.5 s release pulse after **r** (press it again a moment later), **g** / **p** / **h** while a task runs (**s** stops it first), **p** with no glass or place tag in view, a gripper that stopped responding. A pick task that reaches the glass during a release pulse waits for it to end.
 
@@ -457,7 +457,7 @@ These are software guards, **not** a replacement for the UR safety configuration
 | Guard | Value | Where | Effect |
 |---|---|---|---|
 | `MIN_TCP_Z` | −0.05 m | `follow_april_tag.py` (imported by the others) | Targets are clamped above this height (table guard). Jogging down slows near it and stops at it |
-| `MAX_TCP_Z` | 0.60 m | `safe_motion.py` (all active scripts) | Every script sends motion through `SafeControl`. A `moveL` target above it, or a `moveJ` whose arc goes above it, is refused (`MotionRefused`) before anything is sent. `speedL` (jogging, servoing) slows near it and cannot go up past it. Tasks more than 2 cm above it are aborted. Only the TCP is limited; also set a safety plane on the pendant |
+| `MAX_TCP_Z` | 0.85 m | `safe_motion.py` (all active scripts) | Every script sends motion through `SafeControl`. A `moveL` target above it, or a `moveJ` whose arc goes above it, is refused (`MotionRefused`) before anything is sent. `speedL` (jogging, servoing) slows near it and cannot go up past it. Tasks more than 2 cm above it are aborted. Only the TCP is limited; also set a safety plane on the pendant |
 | Jog Z limit | `Z_LIMIT_GAIN` = 2 /s | `gamepad_jog.py` (`Jogger`, `limit_z_speed`), used by every script | Z jog speed ≤ gain × distance to the limit: slowdown starts 4 cm before it. Beyond a limit only the way back is allowed |
 | `MAX_OVERSHOOT` | 20 mm / 15 mm | tag picker / glass pick-place | The farthest a force-guarded push may go past the expected surface |
 | `CONTACT_FORCE` / `PLACE_FORCE` | 12 N / 10 N / 8 N | tag pick / glass pick / glass place | Descent stops above this force |
@@ -465,7 +465,7 @@ These are software guards, **not** a replacement for the UR safety configuration
 | `WATCHDOG_MIN_FREQUENCY` | 5 Hz | `robot_watchdog.py`, used by `pick_place_glasses`, `find_glasses`, `follow_april_tag`, `gamepad_robot_teleop` | The controller stops the control script if no RTDE input arrives for 0.2 s. The next loop iteration re-uploads it and aborts the task |
 | Manual override | – | all task-based scripts | Any stick input aborts the running task |
 | `speedL` time | 0.02 s | everywhere | Never 0. With `time=0` the control script spins and the robot protective-stops with **C271A1** |
-| Tilt check | 10° | `pick_place_glasses.py` | Refuses to start unless the tool points down |
+| Tilt check | 10° | `pick_place_glasses.py` | `pick_top` keeps the start orientation only if it points down within this, otherwise uses the `START_Q` one |
 
 Important: **`speedL` keeps the robot moving at the last commanded speed until the next command or `speedStop`**. The watchdog above stops it if the Python loop hangs. Because of the watchdog, never use a **blocking** `moveJ` / `moveL` in these scripts (it sends nothing while it runs and trips the watchdog): use `async=True` and keep calling `watchdog.kick()`.
 

@@ -58,7 +58,7 @@ SPRAYER_ID = 1
 DEFAULT_SPEED = 1500       # steps/s (4096 steps per turn, ST3215 max ~3400)
 DEFAULT_ACCELERATION = 50  # units of 100 steps/s^2, 0 = maximum
 
-SPRAYER_REST_DEG = 280.0   # servo angle with the pump released
+SPRAYER_REST_DEG = 290.0   # servo angle with the pump released
 SPRAYER_PRESS_DEG = 250.0  # servo angle with the pump pressed
 SPRAY_PERIOD = 2.0         # seconds between the starts of two strokes
 SPRAY_HOLD = 0.2           # seconds to hold the pump pressed
@@ -335,6 +335,8 @@ class Sprayer:
         self.speed = speed
         self._stop = threading.Event()
         self._thread = None
+        self.error = None      # exception that ended the last run, None = fine
+        self.strokes = 0       # strokes done in the last run
 
     @property
     def running(self):
@@ -366,18 +368,29 @@ class Sprayer:
             self._stop.set()
             self._thread.join()
 
+    def request_stop(self):
+        """Like stop(), without waiting for the current stroke (up to `period` s):
+        for loops that must not block, e.g. the robot main loop with its watchdog."""
+        self._stop.set()
+
     def wait(self):
         if self._thread is not None:
             self._thread.join()
 
     def _run(self, count):
-        strokes = 0
-        while not self._stop.is_set() and (count is None or strokes < count):
-            started = time.monotonic()
-            self.stroke()
-            strokes += 1
-            self._stop.wait(max(0.0, self.period - (time.monotonic() - started)))
-        self.rest()
+        # A servo that stops answering ends the thread; error tells a caller polling
+        # `running` that the strokes did not all happen
+        self.error = None
+        self.strokes = 0
+        try:
+            while not self._stop.is_set() and (count is None or self.strokes < count):
+                started = time.monotonic()
+                self.stroke()
+                self.strokes += 1
+                self._stop.wait(max(0.0, self.period - (time.monotonic() - started)))
+            self.rest()
+        except (TimeoutError, ServoError, serial.SerialException) as e:
+            self.error = e
 
 
 def _watch(bus, ids, interval, keep_torque, hold):

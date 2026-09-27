@@ -8,35 +8,96 @@ from above is the foot. GLASS_HEIGHT (table to top of the foot) is both the
 height of that circle for the detection and where the suction cup grabs; it is
 separate from find_glasses.RIM_HEIGHT, so tuning one script can't break the other.
 
-Sequence (p / gamepad Y):
+Task (p / gamepad Y):
+  0. With GO_TO_START_FIRST, away from the start position (START_Q, the same
+     as h), moveJ there first; the rest starts when it has arrived.
   1. Measure the glasses and the place tag (averaged over several frames; the
-     robot should not block the camera's view of them).
-  2. Pick the glass closest to the tag (glasses already standing on the tag
+     robot at START_Q is out of the camera's view).
+  2. Choose the glass closest to the tag (glasses already standing on the tag
      are skipped).
-  3. Up to CARRY_Z, over the glass, down to APPROACH_GAP above the foot, vacuum
-     on, slowly down until the force sensor feels contact, wait for "GRIP OK".
-  4. Up to CARRY_Z, over the tag, down to APPROACH_GAP above the placing
-     height, slowly down until the glass touches the table, release.
-  5. Up to CARRY_Z and back to the start pose (keep it out of the camera view).
-  The tool keeps the orientation it has at the start, which must be pointing
-  down (e.g. after h / home).
+  3. A wrist wound up more than UNWIND_ABOVE_DEG (jogging and moveL wind
+     them up a turn at a time) is turned back a full turn first, gripper
+     empty, where the arm stands (raised if the swing would sag), one wrist
+     at a time: wrist 2, then wrist 1 with the tool parked pointing out
+     along the wrist-1 axis, then wrist 3 (both at once swung the gripper
+     through the forearm). Then the steps of SEQUENCE, one after the other.
+  Every joint move (tool turns, unwinding, spray moves) is first checked in
+  the system_arm capsule model: the gripper may not come closer to the arm
+  than in the closest taught pose (SELF_GAP_MARGIN), so a move the pendant
+  would stop with "tool hitting the arm" is refused before it is sent.
+  4. Up, over the start position the tool turns back to its start orientation,
+     back to the start pose (keep it out of the camera view).
+  SEQUENCE is checked before anything moves (and at program start): a pick with
+  a glass held, a flip without a side grip, a put-down with nothing held or a
+  glass still held at the end is refused. Every step starts and ends with the
+  tool at carry height (clears the other glasses by CARRY_CLEARANCE, with what
+  it holds). Whenever a step needs another tool orientation (sideways for
+  pick_side, pointing down for pick_top), the tool goes up and turns over the
+  start position, away from the glasses, so the start orientation can be
+  anything. The turn is a joint move to the IK solution nearest the taught
+  joints (SIDE_GRIP_Q / TOP_GRIP_Q, o prints them) or else the joints at the
+  start of the task, so the arm has the taught shape and the joints end the
+  same way every cycle (moveL turns let a wrist wind up a turn per cycle until
+  "joint close to limits"). Between two arm shapes the TCP sags on the joint
+  arc; the sag is predicted and the turn done that much higher (up to the
+  ceiling), so it never goes more than TURN_MAX_DIP below the safe height.
+  After every grip, the glass position is taken from
+  where the cup is, not the camera. The window shows "step i/n name: what it does".
+  The default SEQUENCE flips the glass, sprays it, dries it and places it:
+  pick_side, flip, set_down, pick_top, spray, dry, place. To add a step, write a step_<name> generator in SequenceTask and give
+  it a STEP_GRIPS entry (what it needs held before, what it leaves held).
 
-Side grip (PICK_FROM_SIDE = True): the suction cup grabs the glass wall at
-SIDE_GRIP_HEIGHT above the table instead of the foot on top.
-  3. Up, then the tool turns horizontal (pointing from the robot base towards
-     the glass, turned by SIDE_APPROACH_YAW_DEG), over to SIDE_STANDOFF in front
-     of the wall at carry height, down to SIDE_GRIP_HEIGHT, vacuum on, slowly
-     sideways into the wall. A glass slides at ~1 N, long before the force
-     sensor notices, so this stops at the expected wall + SIDE_MAX_PRESS (the
-     force limit only guards against hitting something solid). Wait for
-     "GRIP OK".
-  4. Lift, carry so the glass axis is over the tag (the tool keeps its
-     orientation), slowly down until the glass touches the table, release,
-     back off SIDE_STANDOFF sideways, up.
-  5. Over the start position the tool turns back to its start orientation.
-  The start orientation can be anything (no pointing-down check), e.g. already
-  sideways; the turn to the side orientation happens over the start position.
-  The grip orientation is taught: jog the cup onto a glass wall exactly as it
+Steps:
+  pick_top   Over the glass, down to APPROACH_GAP above its top (GLASS_HEIGHT),
+             vacuum on, slowly down until the force sensor feels contact, wait
+             for "GRIP OK", lift. The cup goes TOP_GRIP_OFFSET (base x / y)
+             from the glass axis, also when placing. The orientation is taught: TOP_GRIP_ROTATION
+             (jog the tool pointing down, turned as it should grip, press o).
+             With None: the start orientation if it points down (within
+             MAX_TILT_DEG), else the one at START_Q.
+  pick_side  The suction cup grabs the glass wall at SIDE_GRIP_HEIGHT above the
+             table with the tool horizontal: to SIDE_STANDOFF in front of the
+             wall at carry height, down to SIDE_GRIP_HEIGHT, vacuum on, slowly
+             sideways into the wall. A glass slides at ~1 N, long before the
+             force sensor notices, so this stops at the expected wall +
+             SIDE_MAX_PRESS (the force limit only guards against hitting
+             something solid). Wait for "GRIP OK", lift.
+  flip       Up to where the turning glass clears the others, turn wrist 3 by
+             180 deg (moveJ, FLIP_SPEED): the tool z axis is horizontal and
+             crosses the glass axis, so the glass turns upside down over the
+             same spot and the TCP stays put. Needs a TCP offset without x/y
+             (MAX_TCP_XY_OFFSET). The next tool turn brings wrist 3 back, so
+             the cable and hose don't wind up. Watches for
+             "GRIP LOST" like every move with the glass held.
+  set_down   Lower the held glass where it is (the spot it was picked from is
+             free), slowly down until it touches the table, release, up (a
+             side grip backs off SIDE_STANDOFF sideways first).
+  spray      Joint move (glass held) to SPRAY_APPROACH above the taught
+             SPRAY_POSE, in the taught arm configuration SPRAY_Q; straight into
+             SPRAY_POSE; SPRAY_STROKES pump strokes of the sprayer servo
+             (bus_servos.Sprayer on SPRAYER_PORT, in its own thread, so the loop
+             goes on); back out and a joint move back to the joints the step
+             started from. The arcs of both joint moves are checked to keep
+             the TCP above carry height - TURN_MAX_DIP. Refused before anything
+             moves when the sprayer did not answer at program start. Stopping
+             (s, sticks, a fault) ends the spraying after the current stroke;
+             the glass stays held.
+  dry        Joint move (glass held, arc checked) to DRY_APPROACH back along the
+             tool z axis from the taught DRY_POSE, in the taught configuration
+             DRY_Q; along the tool z axis into DRY_POSE; wrist 3 swings
+             DRY_ANGLE_DEG one way and the other, DRY_SWINGS times (about the
+             tool z axis: the TCP stays, the glass turns about its own axis with
+             the top grip; needs the TCP on the flange axis like the flip); back
+             to the middle and out along the tool z axis.
+             spray and dry are stations: the arm goes from one straight to the
+             next, and back to the joints it had before the first one only
+             before a step that is not a station.
+  place      The same as set_down, with the glass axis over the place tag.
+  The flipped glass is GLASS_HEIGHT tall either way up, so pick_top after a
+  flip lands at the same height, on the end that stood on the table before
+  (for an upside-down glass: the rim).
+
+Side grip: the grip orientation is taught: jog the cup onto a glass wall exactly as it
   should grip (hold RB for rotation) and press o. It prints SIDE_GRIP_ROTATION
   (the tool orientation in the base frame, used as it is for every glass, the
   approach runs along its tool z axis) and SIDE_GRIP_HEIGHT; copy them into
@@ -50,12 +111,14 @@ SIDE_GRIP_HEIGHT above the table instead of the foot on top.
   the gripper must fit between the glasses on the robot side of the target.
 
 Keys (video window) / gamepad:
-  p  / Y (north)   pick & place one glass
+  p  / Y (north)   run SEQUENCE on one glass (default: flip it, then place it);
+                   with GO_TO_START_FIRST the arm goes to START_Q first
   s  / A (south)   stop / abort (vacuum stays as it is)
   g  / B (east)    grip (vacuum on)
   r  / X (west)    release
-  h  / Start       go home (HOME_Q from follow_april_tag.py, tool pointing down)
-  o                print the side grip constants of the current tool pose
+  h  / Start       go to the start position (START_Q, tool pointing down)
+  o                print the taught constants of the current tool pose: TOP_GRIP_*
+                   when it points down, else SIDE_GRIP_* and SPRAY_POSE / SPRAY_Q
   q / Esc          quit
   Sticks jog the robot (gamepad_jog.py); touching them aborts a running task.
   The mouse edits the detection area as in find_glasses.py.
@@ -64,7 +127,7 @@ Keys (video window) / gamepad:
   in the console and the window; the program keeps running.
 
 All motion goes through safe_motion.py: the TCP never goes above MAX_TCP_Z
-(0.60 m above the base). A move that would is refused and the task stops.
+(0.85 m above the base). A move that would is refused and the task stops.
 
 The place tag (PLACE_TAG_ID, any 36h11 size) lies flat on the table inside
 the camera view; its last seen position is kept, since the placed glass covers
@@ -76,6 +139,14 @@ Motion watchdog (robot_watchdog.py): the robot stops by itself if the main
 loop sends nothing for 0.2 s (stalled loop, camera hang, breakpoint). The
 next loop iteration then re-uploads the control script and aborts the task.
 
+Loop timing: the camera is read in its own thread (FrameGrabber), and glasses
+and tags are detected only between tasks, so during a task the robot is
+stepped every LOOP_PERIOD (10 ms) instead of every video frame (it was 10 Hz:
+moves ended late and the force-guarded pushes stuttered). The video and
+detection run on new frames only. A move is done when the controller's async
+change count has moved on since the command and nothing runs any more (no
+fixed start-up wait), so the next move follows within a loop step.
+
 Faults are recovered in place, without restarting (which would also reset the
 gripper, 2 s): any error in the loop (a robot call failing after a protective
 stop, a lost RTDE connection, no camera frame for FRAME_TIMEOUT) stops all
@@ -84,18 +155,22 @@ if needed and carries on. After a protective stop, clear it on the pendant;
 the control script is then re-uploaded by itself. Ctrl+C, q / Esc or closing
 the window still quit.
 
-Requires: pip install opencv-python ur_rtde pyserial numpy
+Requires: pip install opencv-python ur_rtde pyserial numpy (bus_servos.py for spray)
 """
 
+import threading
 import time
 import traceback
+from itertools import chain
 
 import cv2
 import numpy as np
 
+import bus_servos
 import find_glasses as fg
 import safe_motion
-from follow_april_tag import HOME_Q, IP, MAX_TCP_Z, MIN_TCP_Z, connect_suction
+import system_arm
+from follow_april_tag import IP, MAX_TCP_Z, MIN_TCP_Z, connect_suction
 from gamepad_jog import GamepadControl, Jogger
 from robot_watchdog import RobotWatchdog
 from safe_motion import MotionRefused
@@ -109,26 +184,125 @@ GLASS_HEIGHT = 0.075         # m, upside-down glass: table to top of the foot (s
 CARRY_CLEARANCE = 0.05       # m, gap under the carried glass over the other glasses
 APPROACH_GAP = 0.02          # m, stop this far above the foot / placing height, then go slowly
 MAX_OVERSHOOT = 0.015        # m, push at most this far past the expected height
-MAX_TILT_DEG = 10            # tool must point down within this at the start
+MAX_TILT_DEG = 10            # deg, "pointing down" / "horizontal" within this
+TURN_TOLERANCE_DEG = 1       # deg, a smaller orientation change needs no turn over the start position
+
+# --- sequence -------------------------------------------------------------------
+# What p does with the chosen glass, step by step (SequenceTask.step_<name>):
+#   pick_top   grab the top of the glass, tool pointing down
+#   pick_side  grab the glass wall, tool horizontal (side grip below)
+#   flip       turn the side-gripped glass upside down in the air (wrist 3, 180 deg)
+#   set_down   put the held glass down where it is and release
+#   spray      hold the glass in the taught SPRAY_POSE and work the sprayer servo
+#   dry        hold the glass in the taught DRY_POSE and swing it about the tool axis
+#   place      put the held glass down on the place tag and release
+# ["pick_side", "place"] / ["pick_top", "place"] are the plain pick & place.
+SEQUENCE = ["pick_side", "flip", "set_down", "pick_top", "spray", "dry", "place"]
+
+# --- flip -----------------------------------------------------------------------
+FLIP_SPEED = 0.9             # rad/s, wrist 3 turn with the glass held (was 0.5, raised for speed)
+FLIP_ACCEL = 0.9             # rad/s^2 (was 0.5)
+MAX_TCP_XY_OFFSET = 0.005    # m, the flip turns around the flange axis: a TCP off it would swing the glass
+
+# --- tool turns (over the start position, see SequenceTask.turn) ----------------------
+TURN_SPEED = 1.0             # rad/s, moveJ to the turned orientation (nothing held; was 0.5)
+TURN_ACCEL = 1.0             # rad/s^2 (was 0.5)
+TURN_MAX_DIP = 0.02          # m, the TCP may sag this far below the safe height on the joint arc;
+                             # a turn that sags more is done higher up (see SequenceTask.turn)
+TURN_RAISE_MARGIN = 0.01     # m, extra height each time the turn is raised
+TURN_RAISE_TRIES = 3         # re-plans at a raised height before refusing
+TURN_IK_TOLERANCE = 0.002    # m, IK solution checked against the target with forward kinematics
+TURN_CHECK_STEPS = 20        # forward-kinematics samples along the turn
+CONFIG_TOLERANCE_DEG = 5     # deg, joints this close to the IK solution near the taught ones = the
+                             # taught arm configuration (another branch is ~180 deg off)
+IK_MAX_ERROR = 1e-10         # m / rad, getInverseKinematics max position / orientation error (its default)
+
+# --- spray ------------------------------------------------------------------------
+# Taught spray pose, TCP in the base frame (o prints it): the glass held from the top,
+# tool horizontal, in front of the sprayer. SPRAY_Q = the arm configuration there
+# (joints in rad, wrapped to +-180 deg). The arm goes to SPRAY_APPROACH above it with a
+# joint move, then straight to it, sprays, and comes back the same way.
+SPRAY_POSE = [0.02146, -0.48790, 0.17105, 1.79814, 0.66820, 1.76831]
+SPRAY_Q = [-1.61396, -2.01892, -1.91088, -2.06821, 3.12364, 1.11749]
+SPRAY_APPROACH = [0.0, 0.0, 0.10]   # m in the base frame, start of the straight last bit
+SPRAY_MOVE_SPEED = 0.9       # rad/s, joint moves with the glass held (as FLIP_SPEED; was 0.5)
+SPRAY_MOVE_ACCEL = 0.9       # rad/s^2 (was 0.5)
+SPRAY_STROKES = 10           # pump strokes (was 3, then 6)
+SPRAY_PERIOD = 1.2           # s between the starts of two strokes (bus_servos default 2.0; a stroke
+                             # itself takes ~0.5 s: press, SPRAY_HOLD 0.2 s, release)
+SPRAY_TIMEOUT = SPRAY_STROKES * SPRAY_PERIOD + 8.0   # s, the strokes must be done by then
+SPRAYER_PORT = bus_servos.PORT   # COM port of the bus servo board (machine-specific)
+
+# --- dry --------------------------------------------------------------------------
+# Taught drying pose (o prints it like SPRAY_POSE), glass held from the top, tool tilted
+# 44 deg from pointing down, pointing along base -y. DRY_Q = the arm configuration there.
+# The arm goes (joint move) to DRY_APPROACH back along the tool z axis from it, moves in
+# along the tool z axis, then swings wrist 3 (= about the tool z axis, the glass axis
+# with the top grip) DRY_ANGLE_DEG one way and back the other, DRY_SWINGS times.
+DRY_POSE = [0.18011, -0.65140, 0.26149, 1.10045, -2.39825, 0.94916]
+DRY_Q = [-0.99394, -2.15914, -1.15118, 2.40696, -1.16133, 2.71361]
+DRY_APPROACH = 0.10          # m back along the tool z axis, start of the straight last bit
+DRY_ANGLE_DEG = 60           # deg each way from the drying pose
+DRY_SWINGS = 3               # right-left swings
+DRY_FIRST_DIRECTION = -1     # -1: first clockwise looking along the tool z axis (out of the cup), +1: the other way
+DRY_SPEED = 1.5              # rad/s, wrist 3 swings (the glass turns about its own axis)
+DRY_ACCEL = 3.0              # rad/s^2
+
+# --- start ----------------------------------------------------------------------
+# Start / home joints (rad): h goes here, p goes here first, the task ends here. Taught:
+# TCP at 80, -506, 504 mm, tool tilted 42 deg from pointing down.
+# Wrist 1 stored unwound (taught at 303 deg = -57 deg, one turn wound up).
+START_Q = [-0.98655, -1.34004, -1.79234, -0.99111, 1.10915, -1.47313]
+START_TOLERANCE_DEG = 1      # deg, every joint this close to START_Q counts as at the start
+GO_TO_START_FIRST = False    # p moves to START_Q first when away from it (False: starts where the arm is)
+JOINT_LIMIT_MARGIN_DEG = 60  # deg, turn targets stay this far from the +-360 deg joint limits
+UNWIND_ABOVE_DEG = 200       # deg, a wrist further than this from zero is turned back a full
+                             # turn at the start of a task (see SequenceTask.unwind)
+SELF_GAP_MARGIN = 0.005      # m, joint moves may not bring the gripper closer to the arm than the
+                             # closest taught pose does, minus this (system_arm capsules, see self_gap)
+SELF_CHECK_STEP_DEG = 3      # deg of the biggest joint change between self-collision samples
+UNWIND_PARK_STEP_DEG = 15    # deg, wrist-1 angles tried to make the wrist-2 turn clear
+JOINT_NAMES = ("base", "shoulder", "elbow", "wrist 1", "wrist 2", "wrist 3")
+
+# --- top grip -------------------------------------------------------------------
+# Taught pick_top orientation, axis-angle in the base frame (o key prints it): tool
+# pointing down (2.3 deg off), tool x at -48 deg in the base x/y plane. The descent
+# is along base -z, which is within 2.3 deg of the tool z axis. None = the start
+# orientation if it points down, else the START_Q one.
+TOP_GRIP_ROTATION = [2.84810, -1.26678, 0.05080]
+# Taught arm configuration for it, joints in rad (o prints them): the turn to pointing
+# down picks the joint solution nearest these, so the elbow and wrist are the way they
+# were taught. None = nearest the joints at the start of the task.
+TOP_GRIP_Q = [-1.64260, -2.27068, -1.15258, -1.25635, 1.59322, -2.37796]
+# m, base x / y: where the cup goes relative to the glass axis for the top grip (the cup
+# landed a bit off centre). Also used when placing, so the glass, not the cup, ends up
+# on the tag.
+TOP_GRIP_OFFSET = [0.0, -0.010]
 
 # --- side grip ------------------------------------------------------------------
-PICK_FROM_SIDE = True        # grab the glass wall with the tool horizontal instead of the foot
 SIDE_GRIP_HEIGHT = 0.035    # m above the table, cup center (TCP) on the wall (taught pose); the gripper must clear the table here
 SIDE_GRIP_RADIUS = None      # m, glass radius at SIDE_GRIP_HEIGHT, None = measured foot diameter / 2
 # Taught grip orientation, axis-angle in the base frame (o key prints it), used for
-# every glass; the approach runs along its tool z axis (here base -y, 0.7 deg down).
+# every glass; the approach runs along its tool z axis (here base -y, 1.8 deg down).
+# Re-taught with the gripper rolled 180 deg around the approach (the wrist the other
+# way round), which clears the table beside the glass.
 # None = level tool built from SIDE_APPROACH_YAW_DEG / SIDE_ROLL_DEG instead.
-SIDE_GRIP_ROTATION = [1.48600, -0.65077, 0.65623]
+SIDE_GRIP_ROTATION = [0.72813, 1.77884, -1.70354]
+# Taught arm configuration for it, joints in rad (o prints them, jogged onto a glass as
+# for SIDE_GRIP_ROTATION): the turn sideways picks the joint solution nearest these.
+# Another solution for the same orientation can have the wrist or elbow the other way
+# round and hit the table beside the glass. None = nearest the start joints.
+SIDE_GRIP_Q = [-1.54158, -2.26731, -1.93571, -2.10989, -1.57190, -2.33435]
 SIDE_APPROACH_YAW_DEG = 8    # deg, turn the approach from radial (base -> glass) around vertical
 SIDE_ROLL_DEG = 138          # deg, tool turned around its own axis: 0 = tool x straight down (o key reads it off)
 SIDE_STANDOFF = 0.03         # m, gap between cup and wall before the slow approach and after release
 SIDE_MAX_PRESS = 0.006       # m, go at most this far past the expected wall (camera error, cup compression)
-SIDE_CONTACT_FORCE = 5.0     # N, stop the sideways approach early (a free glass slides before this)
+SIDE_CONTACT_FORCE = 20.0     # N, stop the sideways approach early (a free glass slides before this)
 
-MOVE_SPEED = 0.15            # m/s, moveL
-APPROACH_SPEED = 0.05        # m/s, moveL over to the glass and down next to it / onto the tag
-MOVE_ACCEL = 0.6             # m/s^2 (keep low enough for the vacuum to hold the glass)
-DESCEND_SPEED = 0.015        # m/s, slow final approach
+MOVE_SPEED = 0.35            # m/s, moveL (was 0.15)
+APPROACH_SPEED = 0.10        # m/s, moveL over to the glass and down next to it / onto the tag (was 0.05)
+MOVE_ACCEL = 0.8             # m/s^2 (keep low enough for the vacuum to hold the glass; was 0.6)
+DESCEND_SPEED = 0.02         # m/s, slow final approach, stopped by the force sensor (was 0.015)
 DESCEND_ACCEL = 0.2
 CONTACT_FORCE = 10.0         # N, touching the glass foot
 PLACE_FORCE = 8.0            # N, glass touching the table
@@ -137,9 +311,13 @@ GRIP_DWELL = 0.5             # s, let the vacuum build up before lifting
 GRIP_CONFIRM_TIMEOUT = 6.0   # s
 RELEASE_TIME = 1.7           # s, the release pulse lasts 1.5 s
 SPEED_CMD_TIME = 0.02        # s
+MOVE_START_TIMEOUT = 1.0     # s, a move the controller never reports as started counts as done then
+MOVE_SETTLE = 0.03           # s after a move ends before the next command (its robot-script thread exits)
+ERROR_RETRY_DELAY = 0.1      # s, the loop retries at most this often after an error (no 100 Hz spam)
+LOOP_PERIOD = 0.01           # s, shortest main loop step (the camera has its own thread)
 STOP_DECEL = 1.0             # m/s^2
-HOME_SPEED = 1.0
-HOME_ACCEL = 1.0
+HOME_SPEED = 1.0             # rad/s, moveJ to START_Q
+HOME_ACCEL = 1.0             # rad/s^2
 RECONNECT_DELAY = 1.0        # s, wait after a failed reconnect before the loop retries
 
 GAMEPAD_KEYS = {"BTN_NORTH": "p", "BTN_SOUTH": "s", "BTN_EAST": "g",
@@ -176,28 +354,68 @@ class Task:
             self.done = True
         except (TaskFailed, MotionRefused) as e:
             print(e)
-            self.c.speedStop(STOP_DECEL)
+            self.stop_motion()
             self.status = str(e)
             self.done = True
         except (SerialException, OSError) as e:
             # Gripper unplugged mid-task: stop this task, not the whole program
-            self.c.speedStop(STOP_DECEL)
-            self.c.stopL(STOP_DECEL)
+            self.stop_motion()
             self.status = warn(f"gripper not responding ({e}), task aborted")
             self.done = True
 
     def abort(self):
         self._steps.close()
-        self.c.speedStop(STOP_DECEL)
+        self.stop_motion()
+
+    def stop_motion(self):
+        """Stop everything, the async move thread first. In ur_rtde's robot script only
+        stopL / stopJ (and a new async move) kill the move thread; speedStop / speedL
+        sent while it still runs make the controller stop the program with "another
+        thread is already controlling the robot"."""
         self.c.stopL(STOP_DECEL)
+        self.c.stopJ(STOP_DECEL)
+        self.c.speedStop(STOP_DECEL)
+
+    def async_count(self):
+        """The controller's async operation change count (None without that call)."""
+        try:
+            return self.c.getAsyncOperationProgressEx().changeCount()
+        except AttributeError:
+            return None
+
+    def move_l(self, pose, speed, accel):
+        self._count_before_move = self.async_count()
+        self.c.moveL(pose, speed, accel, True)
+
+    def move_j(self, q, speed, accel):
+        self._count_before_move = self.async_count()
+        self.c.moveJ(q, speed, accel, True)
 
     def wait_move(self, label):
-        """Wait for the asynchronous move started just before."""
+        """Wait for the asynchronous move started just before (move_l / move_j).
+
+        Done once the controller's async status has changed since before the command
+        and nothing runs any more, so the next move follows within a loop step (the
+        old fixed 0.2 s start-up wait cost ~10 s a cycle). A move the controller never
+        reports (one to where the arm already is) ends after MOVE_START_TIMEOUT."""
         start = time.time()
+        before = getattr(self, "_count_before_move", None)
         while True:
-            # Give the async move a moment to start before checking if it finished
-            if time.time() - start > 0.2 and self.c.getAsyncOperationProgress() < 0:
-                return
+            if before is None:
+                # No change count: give the move a moment to start before checking
+                if time.time() - start > 0.2 and self.c.getAsyncOperationProgress() < 0:
+                    return
+            else:
+                status = self.c.getAsyncOperationProgressEx()
+                if not status.isAsyncOperationRunning() and (
+                        status.changeCount() != before or time.time() - start > MOVE_START_TIMEOUT):
+                    break
+            yield label
+        # The robot script's move thread reports "finished" just before it exits: a
+        # speedL / speedStop inside that gap is "another thread is already controlling
+        # the robot" (the next async move kills the thread itself, the rest does not)
+        settle = time.time() + MOVE_SETTLE
+        while time.time() < settle:
             yield label
 
     def wait(self, seconds, label):
@@ -206,125 +424,96 @@ class Task:
             yield label
 
 
+def joint_near_limit(q):
+    """(name, deg) of the first joint within JOINT_LIMIT_MARGIN_DEG of +-360 deg, or None.
+
+    Cartesian moves and jogging let the joints wind up turn by turn; a task started
+    there stops halfway with "joint close to limits" on the pendant."""
+    for name, angle in zip(JOINT_NAMES, np.degrees(q)):
+        if abs(angle) > 360 - JOINT_LIMIT_MARGIN_DEG:
+            return name, angle
+    return None
+
+
+def at_start(r):
+    """True when the joints are at START_Q (joint angles, so a wound-up wrist is not)."""
+    return max(abs(a - b) for a, b in zip(r.getActualQ(), START_Q)) < np.radians(START_TOLERANCE_DEG)
+
+
 class HomeTask(Task):
+    """moveJ to START_Q. then_pick: p was pressed away from the start, pick when there."""
+
+    def __init__(self, r, c, then_pick=False):
+        self.then_pick = then_pick
+        self.arrived = False
+        super().__init__(r, c)
+
     def run(self):
-        home_z = self.c.getForwardKinematics(HOME_Q)[2]
+        home_z = self.c.getForwardKinematics(START_Q)[2]
         if home_z > MAX_TCP_Z:
-            raise TaskFailed(f"home is above the ceiling ({home_z:.3f} > {MAX_TCP_Z:.3f} m), not moving")
-        self.c.moveJ(HOME_Q, HOME_SPEED, HOME_ACCEL, True)
-        yield from self.wait_move("going home...")
-        self.status = "home"
+            raise TaskFailed(f"start is above the ceiling ({home_z:.3f} > {MAX_TCP_Z:.3f} m), not moving")
+        self.move_j(START_Q, HOME_SPEED, HOME_ACCEL)
+        yield from self.wait_move("going to start..." + (" (then pick)" if self.then_pick else ""))
+        self.arrived = True
+        self.status = "at start"
 
     def abort(self):
         self._steps.close()
         self.c.stopJ(STOP_DECEL)
 
 
-class PickPlaceTask(Task):
-    def __init__(self, r, c, suction, glass, place_xy, table_z, glass_height):
-        self.suction = suction
-        self.glass = glass
-        self.place_xy = np.asarray(place_xy)
-        self.table_z = table_z
-        self.glass_height = glass_height
-        super().__init__(r, c)
+class FrameGrabber:
+    """Reads the camera in its own thread, so the robot loop never waits for a frame.
 
-    def move_to(self, xyz, label, holding=False, rotation=None, speed=MOVE_SPEED):
-        xyz = [xyz[0], xyz[1], min(max(xyz[2], MIN_TCP_Z), MAX_TCP_Z)]
-        rotation = self.rotation if rotation is None else rotation
-        self.c.moveL(xyz + list(rotation), speed, MOVE_ACCEL, True)
-        for status in self.wait_move(label):
-            if holding and self.suction.grip_result() == "LOST":
-                self.c.stopL(STOP_DECEL)
-                raise TaskFailed("glass lost while carrying (vacuum still on, r to release)")
-            yield status
+    A read blocks ~60 ms (17 fps) and glass + tag detection take ~40 ms: with both in
+    the loop it ran at 10 Hz, every move ended up to 0.1 s late and a force-guarded
+    push (speedL for SPEED_CMD_TIME, 20 ms) moved only 20 ms out of every 100.
+    """
 
-    def push(self, direction, max_travel, force_limit, label):
-        """Slowly along direction until the force sensor feels contact or max_travel is covered."""
-        direction = np.asarray(direction, dtype=float)
-        direction /= np.linalg.norm(direction)
-        self.c.zeroFtSensor()
-        yield from self.wait(FT_SETTLE, f"{label}: zeroing force sensor")
-        start = np.asarray(self.r.getActualTCPPose()[:3])
-        while True:
-            force = np.linalg.norm(self.r.getActualTCPForce()[:3])
-            pos = np.asarray(self.r.getActualTCPPose()[:3])
-            if force > force_limit:
-                self.c.speedStop(STOP_DECEL)
-                print(f"{label}: contact ({force:.1f} N)")
-                return
-            if (pos - start) @ direction >= max_travel or (direction[2] < 0 and pos[2] <= MIN_TCP_Z):
-                self.c.speedStop(STOP_DECEL)
-                print(f"{label}: no contact felt, reached max depth")
-                return
-            self.c.speedL(list(direction * DESCEND_SPEED) + [0, 0, 0], DESCEND_ACCEL, SPEED_CMD_TIME)
-            yield f"{label}: force {force:.1f} N"
+    def __init__(self, cap):
+        self.cap = cap
+        self._lock = threading.Lock()
+        self._frame = None
+        self._count = 0
+        self._time = time.time()
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
-    def push_down(self, stop_z, force_limit, label):
-        """Slowly down until the force sensor feels contact or stop_z is reached."""
-        z = self.r.getActualTCPPose()[2]
-        yield from self.push([0, 0, -1], z - stop_z, force_limit, label)
+    def _run(self):
+        while not self._stop:
+            ok, frame = self.cap.read()
+            if ok:
+                with self._lock:
+                    self._frame, self._count, self._time = frame, self._count + 1, time.time()
+            else:
+                time.sleep(0.005)
 
-    def wait_for_grip(self, back_off):
-        """Wait for the vacuum; on failure release and move through the back_off points."""
-        grip_start = time.time()
-        while True:
-            result = self.suction.grip_result()
-            elapsed = time.time() - grip_start
-            if elapsed > GRIP_DWELL and result in ("OK", "UNKNOWN"):
-                return
-            if elapsed > GRIP_CONFIRM_TIMEOUT:
-                self.suction.release()
-                for xyz in back_off:
-                    yield from self.move_to(xyz, "grip failed, backing off")
-                raise TaskFailed(f"grip not confirmed ({result}), released (p to retry)")
-            yield f"gripping, waiting for vacuum ({result or 'no report yet'})"
+    def latest(self):
+        """(frame number, frame) of the newest frame; RuntimeError when the camera has
+        sent nothing for fg.FRAME_TIMEOUT (the loop then stops the robot and recovers)."""
+        with self._lock:
+            count, frame, stamp = self._count, self._frame, self._time
+        if frame is None or time.time() - stamp > fg.FRAME_TIMEOUT:
+            raise RuntimeError(f"no frame from the camera for {fg.FRAME_TIMEOUT} s")
+        return count, frame
 
-    def check_start(self):
-        """Start pose, after checking that the tool points down."""
-        start = self.r.getActualTCPPose()
-        R = cv2.Rodrigues(np.asarray(start[3:], dtype=float))[0]
-        tilt = np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1)))
-        if tilt > MAX_TILT_DEG:
-            raise TaskFailed(f"tool is {tilt:.0f} deg from pointing down, go home (h) first")
-        self.rotation = list(start[3:])
-        return start
+    def read(self):
+        """cv2.VideoCapture.read() for fg.measure(): waits for the next new frame."""
+        with self._lock:
+            count = self._count
+        deadline = time.time() + fg.FRAME_TIMEOUT
+        while time.time() < deadline:
+            with self._lock:
+                if self._count != count:
+                    return True, self._frame
+            time.sleep(0.002)
+        return False, None
 
-    def run(self):
-        start = self.check_start()
-        g = self.glass
-        foot_z = self.table_z + self.glass_height       # tip height on top of the glass
-        # The carried glass hangs glass_height below the tip, over glasses glass_height tall
-        carry_z = self.table_z + 2 * self.glass_height + CARRY_CLEARANCE
-        if carry_z > MAX_TCP_Z:
-            raise TaskFailed(f"carry height {carry_z:.3f} m is above MAX_TCP_Z")
-        tx, ty = self.place_xy
-        print(f"Pick glass at {g.x * 1000:.0f}, {g.y * 1000:.0f} mm, "
-              f"place at {tx * 1000:.0f}, {ty * 1000:.0f} mm")
-
-        # Pick
-        yield from self.move_to([start[0], start[1], max(start[2], carry_z)], "up")
-        yield from self.move_to([g.x, g.y, carry_z], "to glass", speed=APPROACH_SPEED)
-        yield from self.move_to([g.x, g.y, foot_z + APPROACH_GAP], "approach glass", speed=APPROACH_SPEED)
-        while not self.suction.grip():
-            yield "waiting for the release pulse to end"
-        yield from self.push_down(foot_z - MAX_OVERSHOOT, CONTACT_FORCE, "pick")
-
-        yield from self.wait_for_grip([[g.x, g.y, carry_z]])
-
-        # Carry and place
-        yield from self.move_to([g.x, g.y, carry_z], "lift", holding=True)
-        yield from self.move_to([tx, ty, carry_z], "carry to tag", holding=True)
-        yield from self.move_to([tx, ty, foot_z + APPROACH_GAP], "lower", holding=True, speed=APPROACH_SPEED)
-        yield from self.push_down(foot_z - MAX_OVERSHOOT, PLACE_FORCE, "place")
-        self.suction.release()
-        yield from self.wait(RELEASE_TIME, "releasing")
-
-        # Out of the camera's way
-        yield from self.move_to([tx, ty, carry_z], "up")
-        yield from self.move_to([start[0], start[1], max(start[2], carry_z)], "back")
-        yield from self.move_to(start[:3], "back")
-        self.status = "placed"
+    def close(self):
+        self._stop = True
+        self._thread.join(timeout=1.0)
+        self.cap.release()
 
 
 def recover(r, c, watchdog):
@@ -333,7 +522,8 @@ def recover(r, c, watchdog):
     The control script itself is re-uploaded by watchdog.kick() on the next
     frame, once the robot is not protective- or emergency-stopped any more.
     """
-    for stop in (c.speedStop, c.stopL, c.stopJ):
+    # stopL / stopJ first: they end the robot script's async move thread, speedStop does not
+    for stop in (c.stopL, c.stopJ, c.speedStop):
         try:
             stop(STOP_DECEL)
         except Exception:
@@ -378,23 +568,413 @@ def read_side_orientation(tcp):
     return (yaw + 180) % 360 - 180, roll
 
 
-class SidePickPlaceTask(PickPlaceTask):
-    """Like PickPlaceTask, but the cup grabs the glass wall with the tool horizontal."""
+def flip_joints(q):
+    """Same joints with wrist 3 turned by 180 deg, towards zero (joint range +-360 deg).
+    Same as system_hardware.flip_joints."""
+    q = list(q)
+    q[5] = q[5] - np.pi if q[5] > 0 else q[5] + np.pi
+    return q
 
-    def run(self):
-        # Any start orientation: the side orientation is built from scratch and the
-        # tool only turns back to the start orientation at the end
-        start = self.r.getActualTCPPose()
-        start_rotation = list(start[3:])
-        g = self.glass
-        glass_xy = np.array([g.x, g.y])
-        radius = SIDE_GRIP_RADIUS if SIDE_GRIP_RADIUS is not None else g.diameter / 2
+
+def tilt_deg(rotation):
+    """Angle between the tool z axis of an axis-angle rotation and straight down."""
+    R = cv2.Rodrigues(np.asarray(rotation, dtype=float))[0]
+    return np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1)))
+
+
+def rotation_angle(a, b):
+    """Angle (rad) between two axis-angle rotations."""
+    R = cv2.Rodrigues(np.asarray(a, dtype=float))[0].T @ cv2.Rodrigues(np.asarray(b, dtype=float))[0]
+    return np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))
+
+
+def self_gap(q, T_flange_tcp):
+    """Smallest gap (m) between the gripper / wrist 3 and the upper arm / forearm, in the
+    system_arm capsule model. Its radii are conservative: the taught spray pose (tool
+    pointing back at the elbow end of the forearm, wrist 2 at 179 deg) is -20 mm there
+    although the arm reaches it, so this is compared with the taught poses, not with 0."""
+    caps = {c[0]: c for c in system_arm.link_capsules(q, T_flange_tcp)}
+    s = np.linspace(0, 1, 12)[:, None]
+    gap = np.inf
+    for moving in ("gripper", "wrist 3"):
+        for fixed in ("upper arm", "forearm"):
+            _, a0, a1, ra, _ = caps[moving]
+            _, b0, b1, rb, _ = caps[fixed]
+            pa, pb = a0 + s * (a1 - a0), b0 + s * (b1 - b0)
+            distance = np.min(np.linalg.norm(pa[:, None, :] - pb[None, :, :], axis=2))
+            gap = min(gap, distance - ra - rb)
+    return gap
+
+
+def joint_samples(waypoints):
+    """Joint vectors along moveJs through waypoints, every SELF_CHECK_STEP_DEG."""
+    for a, b in zip(waypoints, waypoints[1:]):
+        a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+        count = max(1, int(np.ceil(np.max(np.abs(b - a)) / np.radians(SELF_CHECK_STEP_DEG))))
+        for k in range(count + 1):
+            yield a + (b - a) * k / count
+
+
+def unwind_waypoints(q, gap_of, z_of, min_gap):
+    """moveJ waypoints turning every wrist wound past UNWIND_ABOVE_DEG back a full turn,
+    one joint at a time, the same pose at the end; None when no plan keeps the gripper
+    min_gap from the arm (gap_of(q): self_gap; z_of(q): TCP height, for the swing).
+
+    Turning two wrists at once swings the gripper through the forearm. Wrist 2 first:
+    a full wrist-2 turn has to pass the tool pointing back at the arm, and how close
+    that gets depends on wrist 1 (-109 mm in the model with wrist 1 at 80 deg, -20 mm,
+    as tight as the taught spray pose, with it 105 deg further), so wrist 1 is first
+    moved to the nearest angle (UNWIND_PARK_STEP_DEG steps) where that passes. Then
+    wrist 2 is parked with the tool pointing out along the wrist-1 axis while wrist 1
+    goes to its target (back from parking and / or a full turn: the tool stays clear),
+    wrist 3 (only spins the tool about its own axis), wrist 2 to its target."""
+    q = np.asarray(q, dtype=float)
+    target = q.copy()
+    for i in (3, 4, 5):
+        if abs(q[i]) > np.radians(UNWIND_ABOVE_DEG):
+            target[i] -= 2 * np.pi * np.sign(q[i])
+
+    def build(park_wrist_1):
+        path = [q]
+
+        def go(joint, value):
+            if abs(path[-1][joint] - value) > 1e-9:
+                nxt = path[-1].copy()
+                nxt[joint] = value
+                path.append(nxt)
+
+        if target[4] != q[4]:
+            go(3, park_wrist_1)
+            go(4, target[4])
+        if abs(path[-1][3] - target[3]) > 1e-9:
+            go(4, 2 * np.pi * np.round(path[-1][4] / (2 * np.pi)))     # tool out along the wrist-1 axis
+            go(3, target[3])
+        go(5, target[5])
+        go(4, target[4])
+        return path
+
+    limit = np.radians(360 - JOINT_LIMIT_MARGIN_DEG)
+    candidates = []
+    for step in range(0, 181, UNWIND_PARK_STEP_DEG):
+        for sign in ((1,) if step in (0, 180) else (1, -1)):
+            park = q[3] + sign * np.radians(step)
+            if abs(park) > limit or (target[4] == q[4] and step):
+                continue
+            path = build(park)
+            samples = list(joint_samples(path))
+            gap = min(gap_of(x) for x in samples)
+            if gap >= min_gap:
+                z = [z_of(x) for x in samples]
+                candidates.append((step, max(z) - min(z), path))
+        if candidates:
+            return min(candidates, key=lambda c: c[:2])[2]
+    return None
+
+
+# What each step needs held before it and leaves held after it: None = nothing,
+# "top" / "side" = the glass held with that grip, "held" = either grip
+STEP_GRIPS = {"pick_top": (None, "top"), "pick_side": (None, "side"), "flip": ("side", "side"),
+              "spray": ("held", "held"), "dry": ("held", "held"), "set_down": ("held", None), "place": ("held", None)}
+STATION_STEPS = {"spray", "dry"}   # hold the glass at a taught pose, chained (to_station)
+GRIP_WORDS = {None: "nothing held", "top": "a top grip", "side": "a side grip", "held": "a glass held"}
+
+
+def check_sequence(sequence):
+    """Raise TaskFailed if the steps don't fit together, before anything moves."""
+    if not sequence:
+        raise TaskFailed("SEQUENCE is empty")
+    held = None
+    for i, step in enumerate(sequence, 1):
+        if step not in STEP_GRIPS:
+            raise TaskFailed(f"SEQUENCE step {i} '{step}' is unknown (steps: {', '.join(STEP_GRIPS)})")
+        needed, after = STEP_GRIPS[step]
+        if (held is None) if needed == "held" else (held != needed):
+            raise TaskFailed(f"SEQUENCE step {i} '{step}' needs {GRIP_WORDS[needed]}, "
+                             f"there is {GRIP_WORDS[held]}")
+        held = held if after == "held" else after
+    if held is not None:
+        raise TaskFailed("SEQUENCE ends with the glass still held")
+
+
+class SequenceTask(Task):
+    """The SEQUENCE steps on one glass. Each step is a generator method step_<name>;
+    check_sequence() makes sure they fit together before anything moves. Every step
+    starts and ends with the tool at carry height, and keeps this state up to date:
+
+      glass_xy    base x, y of the glass axis: the camera's at first, then taken from
+                  the cup position after every grip and put-down
+      held        None, "top" or "side"
+      hang        m, TCP above the bottom of the glass while held (or where it was
+                  released), so the carry height clears the other glasses
+      tip_offset  TCP x, y minus glass_xy with the current grip
+      rotation    the tool orientation move_to() uses
+    """
+
+    def __init__(self, r, c, suction, glass, place_xy, table_z, glass_height, sequence=SEQUENCE,
+                 sprayer=None):
+        self.suction = suction
+        self.sprayer = sprayer
+        self.glass_xy = np.array([glass.x, glass.y])
+        self.radius = SIDE_GRIP_RADIUS if SIDE_GRIP_RADIUS is not None else glass.diameter / 2
+        self.place_xy = np.asarray(place_xy)
+        self.table_z = table_z
+        self.glass_height = glass_height
+        self.sequence = list(sequence)
+        self.held = None
+        self.hang = glass_height
+        self.tip_offset = np.zeros(2)
+        self.flipped = False         # wrist 3 turned by flip(), turned back by the next turn()
+        self.station_return_q = None  # joints before the first station (spray, dry), see to_station
+        self.station_exit = None      # pose to back out to from the current station
+        super().__init__(r, c)
+
+    @property
+    def carry_z(self):
+        # The glass hangs self.hang below the tip, over glasses glass_height tall
+        return self.table_z + self.glass_height + CARRY_CLEARANCE + self.hang
+
+    @property
+    def flip_z(self):
+        # Turning around the tool z axis (horizontal), the glass sweeps a circle through
+        # its farthest point: its far end along the glass axis, one radius to the side
+        sweep = np.hypot(max(self.hang, self.glass_height - self.hang), self.radius)
+        return self.table_z + self.glass_height + CARRY_CLEARANCE + sweep
+
+    # --- motion helpers ---------------------------------------------------------------
+    def move_to(self, xyz, label, holding=False, rotation=None, speed=MOVE_SPEED):
+        xyz = [xyz[0], xyz[1], min(max(xyz[2], MIN_TCP_Z), MAX_TCP_Z)]
+        rotation = self.rotation if rotation is None else rotation
+        self.move_l(xyz + list(rotation), speed, MOVE_ACCEL)
+        steps = self.wait_move(label)
+        yield from self.watch_grip(steps, self.c.stopL) if holding else steps
+
+    def watch_grip(self, steps, stop):
+        """Pass a move's steps through; stop it if the vacuum reports the glass lost."""
+        for status in steps:
+            if self.suction.grip_result() == "LOST":
+                stop(STOP_DECEL)
+                raise TaskFailed("glass lost while carrying (vacuum still on, r to release)")
+            yield status
+
+    def push(self, direction, max_travel, force_limit, label):
+        """Slowly along direction until the force sensor feels contact or max_travel is covered."""
+        direction = np.asarray(direction, dtype=float)
+        direction /= np.linalg.norm(direction)
+        self.c.zeroFtSensor()
+        yield from self.wait(FT_SETTLE, f"{label}: zeroing force sensor")
+        start = np.asarray(self.r.getActualTCPPose()[:3])
+        while True:
+            force = np.linalg.norm(self.r.getActualTCPForce()[:3])
+            pos = np.asarray(self.r.getActualTCPPose()[:3])
+            if force > force_limit:
+                self.c.speedStop(STOP_DECEL)
+                print(f"{label}: contact ({force:.1f} N)")
+                return
+            if (pos - start) @ direction >= max_travel or (direction[2] < 0 and pos[2] <= MIN_TCP_Z):
+                self.c.speedStop(STOP_DECEL)
+                print(f"{label}: no contact felt, reached max depth")
+                return
+            self.c.speedL(list(direction * DESCEND_SPEED) + [0, 0, 0], DESCEND_ACCEL, SPEED_CMD_TIME)
+            yield f"{label}: force {force:.1f} N"
+
+    def push_down(self, stop_z, force_limit, label):
+        """Slowly down until the force sensor feels contact or stop_z is reached."""
+        z = self.r.getActualTCPPose()[2]
+        yield from self.push([0, 0, -1], z - stop_z, force_limit, label)
+
+    def vacuum_on(self):
+        while not self.suction.grip():
+            yield "waiting for the release pulse to end"
+
+    def wait_for_grip(self, back_off):
+        """Wait for the vacuum; on failure release and move through the back_off points."""
+        grip_start = time.time()
+        while True:
+            result = self.suction.grip_result()
+            elapsed = time.time() - grip_start
+            if elapsed > GRIP_DWELL and result in ("OK", "UNKNOWN"):
+                return
+            if elapsed > GRIP_CONFIRM_TIMEOUT:
+                self.suction.release()
+                for xyz in back_off:
+                    yield from self.move_to(xyz, "grip failed, backing off")
+                raise TaskFailed(f"grip not confirmed ({result}), released (p to retry)")
+            yield f"gripping, waiting for vacuum ({result or 'no report yet'})"
+
+    def gripped(self, grip, tip_offset):
+        """After a confirmed grip: the glass axis is where the cup says, not the camera."""
+        self.held = grip
+        self.tip_offset = np.asarray(tip_offset, dtype=float)
+        self.glass_xy = np.asarray(self.r.getActualTCPPose()[:2]) - self.tip_offset
+
+    def turn(self, rotation, label, q_near=None, force=False, keep_turns=False):
+        """Turn the tool to rotation high up over the start position, away from the
+        glasses. With no turn to make, only up to carry height where the tool is.
+
+        The turn is a moveJ to the IK solution nearest q_near (the taught joints for
+        that grip, else the joints at the start of the task), not a moveL: going round
+        start -> side -> down -> start with moveL lets the controller pick the joint
+        path, and a wrist can come back a full turn further each cycle until the
+        pendant stops it ("joint close to limits"). This way every turn ends on the
+        same joints every cycle, and a flipped wrist 3 is turned back too.
+        Between two arm shapes the joints move in a straight line and the TCP along
+        an arc that can sag 10 cm or more. The arc is predicted first, and the turn
+        happens high enough (up to the ceiling) that it never sags more than
+        TURN_MAX_DIP below the safe height."""
+        tcp = self.r.getActualTCPPose()
+        up = [tcp[0], tcp[1], max(tcp[2], self.carry_z)]
+        # No turn only when the orientation AND the arm configuration are right: the
+        # same orientation also has a wrist-flipped solution (wrist 1 / 3 +180 deg,
+        # wrist 2 mirrored), which ran the gripper into the table beside the glass
+        if (not force and not self.flipped
+                and rotation_angle(self.rotation, rotation) < np.radians(TURN_TOLERANCE_DEG)
+                and (q_near is None or self.configuration_error(q_near) < np.radians(CONFIG_TOLERANCE_DEG))):
+            yield from self.move_to(up, "up")
+            return
+        start = self.start
+        safe_z = max(start[2], self.carry_z)
+        q_near = self.start_q if q_near is None else q_near
+        yield from self.move_to([up[0], up[1], max(up[2], safe_z)], "up")
+        yield from self.move_to([start[0], start[1], safe_z], "over start position")
+
+        # Raise the turn until the predicted arc stays up (from the joints the arm
+        # will have up there: same orientation, nearest the joints now)
+        turn_z = safe_z
+        for _ in range(TURN_RAISE_TRIES):
+            q_from = None
+            if turn_z > safe_z:
+                q_from = self.ik([start[0], start[1], turn_z] + list(self.rotation), self.r.getActualQ())
+            q, lowest = self.turn_plan([start[0], start[1], turn_z] + list(rotation), q_near, q_from, keep_turns)
+            if lowest >= safe_z - TURN_MAX_DIP:
+                break
+            turn_z += safe_z - TURN_MAX_DIP - lowest + TURN_RAISE_MARGIN
+            if turn_z > MAX_TCP_Z:
+                raise TaskFailed(f"tool turn sags {(safe_z - lowest) * 1000:.0f} mm, no room to turn "
+                                 f"above it under the ceiling (teach SIDE_GRIP_Q / TOP_GRIP_Q closer)")
+        else:
+            raise TaskFailed(f"tool turn sags to z {lowest:.3f} m even raised to {turn_z:.3f} m")
+        if turn_z > safe_z:
+            yield from self.move_to([start[0], start[1], turn_z], "up to turn height")
+            # Checked again from the joints the arm really has now
+            q, lowest = self.turn_plan([start[0], start[1], turn_z] + list(rotation), q_near,
+                                       keep_turns=keep_turns)
+            if lowest < safe_z - TURN_MAX_DIP:
+                raise TaskFailed(f"tool turn would sag to z {lowest:.3f} m, more than "
+                                 f"{TURN_MAX_DIP * 1000:.0f} mm below the safe height {safe_z:.3f} m")
+        self.move_j(q, TURN_SPEED, TURN_ACCEL)
+        yield from self.wait_move(label)
+        self.flipped = False
+        self.rotation = list(rotation)
+
+    def configuration_error(self, q_ref):
+        """Largest joint difference (rad) between the joints now and the robot's IK
+        solution for the pose now nearest q_ref (by whole turns): ~0 in the arm
+        configuration of q_ref, ~180 deg on another branch (wrist flipped...)."""
+        q = np.asarray(self.r.getActualQ(), dtype=float)
+        ref = np.asarray(q_ref, dtype=float)
+        near = ref + 2 * np.pi * np.round((q - ref) / (2 * np.pi))
+        solution = self.ik(self.r.getActualTCPPose(), near)
+        return float(np.max(np.abs(np.asarray(solution) - q)))
+
+    def check_configuration(self, q_ref, name):
+        """Refuse to go on (down to the glass) in another arm configuration than taught."""
+        if q_ref is None:
+            return
+        error = self.configuration_error(q_ref)
+        if error > np.radians(CONFIG_TOLERANCE_DEG):
+            raise TaskFailed(f"arm is not in the taught {name} configuration "
+                             f"({np.degrees(error):.0f} deg off), not going down")
+
+    def ik(self, target, q_near):
+        """Joints reaching target nearest q_near, checked with forward kinematics."""
+        # Every argument explicit: ur_rtde reads missing ones from stale registers
+        # (see safe_motion.getForwardKinematics)
+        q = list(self.c.getInverseKinematics(list(target), list(q_near), IK_MAX_ERROR, IK_MAX_ERROR))
+        reached = self.c.getForwardKinematics(q, self.c.getTCPOffset())
+        if (np.linalg.norm(np.subtract(reached[:3], target[:3])) > TURN_IK_TOLERANCE
+                or rotation_angle(reached[3:], target[3:]) > np.radians(TURN_TOLERANCE_DEG)):
+            raise TaskFailed("no joint solution for the tool turn over the start position")
+        return q
+
+    def turn_plan(self, target, q_near, q_from=None, keep_turns=False):
+        """(joints for target nearest q_near, lowest TCP z on the joint arc from q_from).
+
+        q_from defaults to the joints now. Unless keep_turns, q_near is shifted by
+        whole turns to the ones the joints have: the same arm shape without turning
+        a wrist a full circle (that swings the TCP ~10 cm down on the arc). Where
+        that would end near a joint limit, the unwound equivalent is used instead:
+        the wrist then turns back a full circle on this move (turn() raises the
+        turn for the swing). unwind() at the start of the task makes that rare."""
+        q0 = np.asarray(self.r.getActualQ() if q_from is None else q_from, dtype=float)
+        q_near = np.asarray(q_near, dtype=float)
+        if not keep_turns:
+            shifted = q_near + 2 * np.pi * np.round((q0 - q_near) / (2 * np.pi))
+            # Only where that saves more than half a turn (a wound wrist); a change of
+            # configuration (~180 deg) takes the plain, unwound angles
+            q_near = np.where(np.abs(q0 - q_near) - np.abs(q0 - shifted) > np.pi, shifted, q_near)
+            limit = np.radians(360 - JOINT_LIMIT_MARGIN_DEG)
+            q_near = np.where(np.abs(q_near) > limit, q_near - 2 * np.pi * np.sign(q_near), q_near)
+        q = self.ik(target, q_near)
+        near = joint_near_limit(q)
+        if near is not None:
+            raise TaskFailed(f"tool turn would take {near[0]} to {near[1]:.0f} deg, near its limit")
+        return q, self.arc_lowest(q0, q, "tool turn")
+
+    def arc_lowest(self, q0, q1, label):
+        """Lowest TCP z on a moveJ from q0 to q1 (joints in a line, the TCP on an arc).
+        Refused when the gripper would come closer to the arm than any taught pose."""
+        q0, q1 = np.asarray(q0, dtype=float), np.asarray(q1, dtype=float)
+        self.check_self_gap([q0, q1], label)
+        offset = self.c.getTCPOffset()
+        z = [self.c.getForwardKinematics(list(q0 + t * (q1 - q0)), offset)[2]
+             for t in np.linspace(0, 1, TURN_CHECK_STEPS + 1)[1:]]
+        if max(z) > MAX_TCP_Z:
+            raise TaskFailed(f"{label} would rise to z {max(z):.3f} m, above the ceiling")
+        return min(z)
+
+    def put_down(self, glass_xy, label):
+        """Lower the held glass onto the table with its axis at glass_xy, release, leave."""
+        tx, ty = np.asarray(glass_xy) + self.tip_offset
+        z = self.table_z + self.hang                     # TCP with the glass standing on the table
+        yield from self.move_to([tx, ty, self.carry_z], f"carry to {label}", holding=True)
+        yield from self.move_to([tx, ty, z + APPROACH_GAP], "lower", holding=True, speed=APPROACH_SPEED)
+        yield from self.push_down(z - MAX_OVERSHOOT, PLACE_FORCE, label)
+        self.suction.release()
+        yield from self.wait(RELEASE_TIME, "releasing")
+        tcp = np.asarray(self.r.getActualTCPPose()[:3])
+        self.glass_xy = tcp[:2] - self.tip_offset
+        if self.held == "side":
+            # Back off sideways before going up so the cup does not drag the glass
+            tcp = tcp - self.approach * SIDE_STANDOFF
+            yield from self.move_to(list(tcp), "back off")
+        self.held = None
+        yield from self.move_to([tcp[0], tcp[1], self.carry_z], "up")
+
+    # --- the steps (SEQUENCE names) ---------------------------------------------------
+    def step_pick_top(self):
+        """Grab the top of the standing glass, tool pointing down."""
+        self.hang = self.glass_height
+        x, y = self.glass_xy + np.asarray(TOP_GRIP_OFFSET)
+        top_z = self.table_z + self.glass_height         # cup lands on top of the glass
+        yield from self.turn(self.down_rotation, "turn tool down", TOP_GRIP_Q)
+        yield from self.move_to([x, y, self.carry_z], "to glass", speed=APPROACH_SPEED)
+        self.check_configuration(TOP_GRIP_Q, "top grip")
+        yield from self.move_to([x, y, top_z + APPROACH_GAP], "approach glass", speed=APPROACH_SPEED)
+        yield from self.vacuum_on()
+        yield from self.push_down(top_z - MAX_OVERSHOOT, CONTACT_FORCE, "pick")
+        yield from self.wait_for_grip([[x, y, self.carry_z]])
+        self.gripped("top", TOP_GRIP_OFFSET)
+        tcp = self.r.getActualTCPPose()
+        yield from self.move_to([tcp[0], tcp[1], self.carry_z], "lift", holding=True)
+
+    def step_pick_side(self):
+        """Grab the glass wall at SIDE_GRIP_HEIGHT, tool horizontal."""
+        glass_xy = self.glass_xy
         if np.linalg.norm(glass_xy) < 0.1:
             raise TaskFailed("glass is too close to the robot base for a side grip")
-
         if SIDE_GRIP_ROTATION is not None:
             # Taught orientation as it is, approach along its tool z axis (may dip a little)
-            self.rotation = list(SIDE_GRIP_ROTATION)
+            rotation = list(SIDE_GRIP_ROTATION)
             approach = cv2.Rodrigues(np.asarray(SIDE_GRIP_ROTATION, dtype=float))[0][:, 2]
             d = approach[:2] / np.linalg.norm(approach[:2])
         else:
@@ -405,51 +985,261 @@ class SidePickPlaceTask(PickPlaceTask):
             d = np.array([radial[0] * np.cos(yaw) - radial[1] * np.sin(yaw),
                           radial[0] * np.sin(yaw) + radial[1] * np.cos(yaw)])
             approach = np.array([d[0], d[1], 0.0])
-            self.rotation = side_rotation(d, SIDE_ROLL_DEG)
-
-        grip_z = self.table_z + SIDE_GRIP_HEIGHT
-        # The carried glass hangs SIDE_GRIP_HEIGHT below the tip, over glasses glass_height tall
-        carry_z = self.table_z + self.glass_height + SIDE_GRIP_HEIGHT + CARRY_CLEARANCE
-        if carry_z > MAX_TCP_Z:
-            raise TaskFailed(f"carry height {carry_z:.3f} m is above MAX_TCP_Z")
-        safe_z = max(start[2], carry_z)
+            rotation = side_rotation(d, SIDE_ROLL_DEG)
+        self.approach = approach
+        self.hang = SIDE_GRIP_HEIGHT
         # SIDE_STANDOFF back along the approach from the wall point at grip height
-        wall = np.array([*(glass_xy - d * radius), grip_z])
+        wall = np.array([*(glass_xy - d * self.radius), self.table_z + SIDE_GRIP_HEIGHT])
         standoff = wall - approach * SIDE_STANDOFF
-        tx, ty = self.place_xy - d * radius      # tip position with the glass axis over the tag
-        print(f"Side pick glass at {g.x * 1000:.0f}, {g.y * 1000:.0f} mm "
-              f"(radius {radius * 1000:.0f} mm), place at "
-              f"{self.place_xy[0] * 1000:.0f}, {self.place_xy[1] * 1000:.0f} mm")
 
-        # Turn the tool horizontal high up, away from the glasses
-        yield from self.move_to([start[0], start[1], safe_z], "up", rotation=start_rotation)
-        yield from self.move_to([start[0], start[1], safe_z], "turn tool sideways")
-        yield from self.move_to([standoff[0], standoff[1], carry_z], "to glass", speed=APPROACH_SPEED)
+        yield from self.turn(rotation, "turn tool sideways", SIDE_GRIP_Q)
+        yield from self.move_to([standoff[0], standoff[1], self.carry_z], "to glass", speed=APPROACH_SPEED)
+        self.check_configuration(SIDE_GRIP_Q, "side grip")
         yield from self.move_to(list(standoff), "down beside glass", speed=APPROACH_SPEED)
-        while not self.suction.grip():
-            yield "waiting for the release pulse to end"
+        yield from self.vacuum_on()
         yield from self.push(approach, SIDE_STANDOFF + SIDE_MAX_PRESS, SIDE_CONTACT_FORCE, "pick")
-        yield from self.wait_for_grip([list(standoff),
-                                       [standoff[0], standoff[1], carry_z]])
-
-        # Carry and place
+        yield from self.wait_for_grip([list(standoff), [standoff[0], standoff[1], self.carry_z]])
+        self.gripped("side", -d * self.radius)
         tcp = self.r.getActualTCPPose()
-        yield from self.move_to([tcp[0], tcp[1], carry_z], "lift", holding=True)
-        yield from self.move_to([tx, ty, carry_z], "carry to tag", holding=True)
-        yield from self.move_to([tx, ty, grip_z + APPROACH_GAP], "lower", holding=True, speed=APPROACH_SPEED)
-        yield from self.push_down(grip_z - MAX_OVERSHOOT, PLACE_FORCE, "place")
-        self.suction.release()
-        yield from self.wait(RELEASE_TIME, "releasing")
+        yield from self.move_to([tcp[0], tcp[1], self.carry_z], "lift", holding=True)
 
-        # Back off sideways before going up so the cup does not drag the glass
+    def step_flip(self):
+        """Turn the side-gripped glass upside down with wrist 3 alone. The glass axis
+        crosses the tool z axis, so the glass stays over the spot it was picked from
+        (free space) and only its ends swap: the TCP ends up glass_height - hang above
+        its new bottom."""
         tcp = self.r.getActualTCPPose()
-        away = np.array(tcp[:3]) - approach * SIDE_STANDOFF
-        yield from self.move_to(list(away), "back off")
-        yield from self.move_to([away[0], away[1], carry_z], "up")
-        yield from self.move_to([start[0], start[1], safe_z], "back")
-        yield from self.move_to([start[0], start[1], safe_z], "turn tool back", rotation=start_rotation)
-        yield from self.move_to(start[:3], "back", rotation=start_rotation)
-        self.status = "placed"
+        yield from self.move_to([tcp[0], tcp[1], self.flip_z], "up to flip height", holding=True)
+        q = self.r.getActualQ()
+        self.flipped = True
+        self.move_j(flip_joints(q), FLIP_SPEED, FLIP_ACCEL)
+        yield from self.watch_grip(self.wait_move("turning glass"), self.c.stopJ)
+        self.rotation = list(self.r.getActualTCPPose()[3:])
+        self.hang = self.glass_height - self.hang
+        yield from self.move_to([tcp[0], tcp[1], self.carry_z], "down to carry height", holding=True)
+
+    # --- stations: taught poses the held glass is taken to (spray, dry) -------------
+    def to_station(self, pose, q_ref, approach, name):
+        """Take the held glass to a taught station pose: joint move (in the taught arm
+        configuration q_ref, arc checked) to pose + approach, then straight in.
+        Stations chain: from one straight to the next; back to the joints before the
+        first one only before a step that is not a station (leave_stations)."""
+        if self.station_return_q is None:
+            self.station_return_q = self.r.getActualQ()
+        entry = list(np.add(pose[:3], approach)) + list(pose[3:])
+        # Joint move with the glass held: the TCP arc must keep the glass over the others
+        q_entry, lowest = self.turn_plan(entry, q_ref)
+        if lowest < self.carry_z - TURN_MAX_DIP:
+            raise TaskFailed(f"move to the {name} would sag to z {lowest:.3f} m "
+                             f"(lengthen its approach or teach its joints closer)")
+        self.move_j(q_entry, SPRAY_MOVE_SPEED, SPRAY_MOVE_ACCEL)
+        yield from self.watch_grip(self.wait_move(f"to the {name}"), self.c.stopJ)
+        yield from self.move_to(pose[:3], f"into the {name} pose", holding=True,
+                                rotation=pose[3:], speed=APPROACH_SPEED)
+        self.station_exit = entry
+
+    def out_of_station(self, name):
+        exit_pose = self.station_exit
+        yield from self.move_to(exit_pose[:3], f"out of the {name} pose", holding=True, rotation=exit_pose[3:])
+
+    def leave_stations(self):
+        """Back to the joints before the first station, where the glass hangs as picked
+        (the same joints, so nothing winds up)."""
+        if self.station_return_q is None:
+            return
+        back_q = self.station_return_q
+        lowest = self.arc_lowest(self.r.getActualQ(), back_q, "move back from the stations")
+        if lowest < self.carry_z - TURN_MAX_DIP:
+            raise TaskFailed(f"move back from the stations would sag to z {lowest:.3f} m")
+        self.move_j(list(back_q), SPRAY_MOVE_SPEED, SPRAY_MOVE_ACCEL)
+        yield from self.watch_grip(self.wait_move("back from the stations"), self.c.stopJ)
+        self.station_return_q = None
+
+    def step_spray(self):
+        """Hold the glass in the taught SPRAY_POSE and work the sprayer."""
+        yield from self.to_station(SPRAY_POSE, SPRAY_Q, SPRAY_APPROACH, "sprayer")
+        self.sprayer.start(period=SPRAY_PERIOD, count=SPRAY_STROKES)
+        try:
+            end = time.time() + SPRAY_TIMEOUT
+            while self.sprayer.running:
+                if time.time() > end:
+                    raise TaskFailed(f"sprayer not done after {SPRAY_TIMEOUT:.0f} s (glass still held)")
+                if self.suction.grip_result() == "LOST":
+                    raise TaskFailed("glass lost while spraying (vacuum still on, r to release)")
+                yield f"spraying, stroke {self.sprayer.strokes + 1}/{SPRAY_STROKES}"
+            if self.sprayer.error is not None:
+                raise TaskFailed(f"sprayer failed ({self.sprayer.error}), glass still held")
+        finally:
+            # Also on s / abort: stop after the current stroke without blocking the loop
+            self.sprayer.request_stop()
+        yield from self.out_of_station("sprayer")
+
+    def step_dry(self):
+        """Hold the glass in the taught DRY_POSE, coming in along the tool z axis, and
+        swing it about that axis (wrist 3: the TCP stays, the glass turns about its own
+        axis with the top grip) DRY_ANGLE_DEG each way, DRY_SWINGS times."""
+        tool_z = cv2.Rodrigues(np.asarray(DRY_POSE[3:], dtype=float))[0][:, 2]
+        yield from self.to_station(DRY_POSE, DRY_Q, -DRY_APPROACH * tool_z, "drying")
+        center = list(self.r.getActualQ())
+        swing = DRY_FIRST_DIRECTION * np.radians(DRY_ANGLE_DEG)
+        for extreme in (center[5] + swing, center[5] - swing):
+            q = center[:5] + [extreme]
+            near = joint_near_limit(q)
+            if near is not None:
+                raise TaskFailed(f"drying swing would take {near[0]} to {near[1]:.0f} deg, near its limit")
+        for i in range(DRY_SWINGS):
+            for extreme in (center[5] + swing, center[5] - swing):
+                self.move_j(center[:5] + [extreme], DRY_SPEED, DRY_ACCEL)
+                yield from self.watch_grip(self.wait_move(f"drying, swing {i + 1}/{DRY_SWINGS}"), self.c.stopJ)
+        self.move_j(center, DRY_SPEED, DRY_ACCEL)
+        yield from self.watch_grip(self.wait_move("drying done"), self.c.stopJ)
+        yield from self.out_of_station("drying")
+
+    def step_set_down(self):
+        """Put the held glass down where it is: the spot it was picked from is free."""
+        yield from self.put_down(self.glass_xy, "set down")
+
+    def step_place(self):
+        """Put the held glass down on the place tag."""
+        yield from self.put_down(self.place_xy, "tag")
+
+    # --- the whole task -----------------------------------------------------------------
+    def check_start(self):
+        """Refuse what can't work before anything moves."""
+        check_sequence(self.sequence)
+        # Joint moves may come as close to the arm as the closest pose taught by hand
+        T_tool = system_arm.pose_matrix(self.c.getTCPOffset())
+        taught = [self.start_q] + [q for q in (SIDE_GRIP_Q, TOP_GRIP_Q, SPRAY_Q, START_Q) if q is not None]
+        self.min_self_gap = min(self_gap(q, T_tool) for q in taught) - SELF_GAP_MARGIN
+        if "pick_top" in self.sequence:
+            # Taught, else the start orientation if it points down (as before), else home
+            candidates = ([TOP_GRIP_ROTATION] if TOP_GRIP_ROTATION is not None else
+                          [self.start[3:], self.c.getForwardKinematics(START_Q)[3:]])
+            for rotation in candidates:
+                if tilt_deg(rotation) <= MAX_TILT_DEG:
+                    self.down_rotation = list(rotation)
+                    break
+            else:
+                source = "TOP_GRIP_ROTATION" if TOP_GRIP_ROTATION is not None else "START_Q"
+                raise TaskFailed(f"{source} does not point the tool down, can't pick from the top")
+        if "spray" in self.sequence and self.sprayer is None:
+            raise TaskFailed(f"SEQUENCE sprays, but the sprayer on {SPRAYER_PORT} is not connected")
+        if "flip" in self.sequence or "dry" in self.sequence:
+            offset = self.c.getTCPOffset()
+            if np.hypot(offset[0], offset[1]) > MAX_TCP_XY_OFFSET:
+                raise TaskFailed("TCP offset has x/y (pendant), wrist 3 turns (flip, dry) would swing the glass")
+        # Highest carry height of each step, the glass either way up
+        side_hang = max(SIDE_GRIP_HEIGHT, self.glass_height - SIDE_GRIP_HEIGHT)
+        extra = {"pick_top": self.glass_height, "pick_side": side_hang,
+                 "flip": np.hypot(side_hang, self.radius)}
+        for step in set(self.sequence) & extra.keys():
+            z = self.table_z + self.glass_height + CARRY_CLEARANCE + extra[step]
+            if z > MAX_TCP_Z:
+                raise TaskFailed(f"{step}: carry height {z:.3f} m is above MAX_TCP_Z")
+
+    def check_self_gap(self, waypoints, label):
+        """Refuse moveJs through waypoints that bring the gripper too close to the arm
+        (before the pendant does, with "tool hitting the arm" and a protective stop)."""
+        T_tool = system_arm.pose_matrix(self.c.getTCPOffset())
+        gap = min(self_gap(q, T_tool) for q in joint_samples(waypoints))
+        if gap < self.min_self_gap:
+            raise TaskFailed(f"{label} would bring the gripper {(self.min_self_gap - gap) * 1000:.0f} mm "
+                             f"closer to the arm than any taught pose, not moving")
+
+    def unwind(self):
+        """Turn wound-up wrists back a full turn at the start of the task, gripper
+        empty, one joint at a time (unwind_waypoints): the same pose with the joint
+        angles back near zero, so no turn later in the task runs into the +-360 deg
+        joint limits ("joint close to limits" on the pendant). Jogging and moveL wind
+        them up a turn at a time. Done high up where the arm stands, the TCP arc
+        predicted with the model and the unwinding raised until it stays up."""
+        q = np.asarray(self.start_q, dtype=float)
+        if np.any(np.abs(q[:3]) > np.radians(UNWIND_ABOVE_DEG)):
+            raise TaskFailed("base joint wound up a full turn, turn it back on the pendant first")
+        if not np.any(np.abs(q[3:]) > np.radians(UNWIND_ABOVE_DEG)):
+            return
+        T_tool = system_arm.pose_matrix(self.c.getTCPOffset())
+        safe_z = max(self.start[2], self.carry_z)
+
+        def plan():
+            waypoints = unwind_waypoints(self.r.getActualQ(), lambda x: self_gap(x, T_tool),
+                                         lambda x: system_arm.tcp_matrix(list(x), T_tool)[2, 3],
+                                         self.min_self_gap)
+            if waypoints is None:
+                raise TaskFailed("no way to unwind the wrists without the gripper coming closer to "
+                                 "the arm than any taught pose; unwind on the pendant")
+            z = [system_arm.tcp_matrix(list(p), T_tool)[2, 3] for p in joint_samples(waypoints)]
+            # Model heights relative to where the arm really is (nominal DH is a few mm off)
+            shift = self.r.getActualTCPPose()[2] - system_arm.tcp_matrix(list(waypoints[0]), T_tool)[2, 3]
+            return waypoints, min(z) + shift, max(z) + shift
+
+        tcp = self.r.getActualTCPPose()
+        yield from self.move_to([tcp[0], tcp[1], max(tcp[2], safe_z)], "up to unwind")
+        waypoints, lowest, highest = plan()
+        if lowest < safe_z - TURN_MAX_DIP:
+            rise = safe_z - TURN_MAX_DIP - lowest + TURN_RAISE_MARGIN
+            if highest + rise > MAX_TCP_Z:
+                raise TaskFailed(f"unwinding swings the TCP {(highest - lowest) * 1000:.0f} mm up and down, "
+                                 f"no room under the ceiling; unwind on the pendant")
+            tcp = self.r.getActualTCPPose()
+            yield from self.move_to([tcp[0], tcp[1], tcp[2] + rise], "up to unwind")
+            waypoints, lowest, highest = plan()
+            if lowest < safe_z - TURN_MAX_DIP:
+                raise TaskFailed(f"unwinding would sag to z {lowest:.3f} m, not moving")
+        self.check_self_gap(waypoints, "unwinding")
+        names = ", ".join(f"{JOINT_NAMES[i]} {np.degrees(waypoints[0][i]):.0f} -> "
+                          f"{np.degrees(waypoints[-1][i]):.0f} deg"
+                          for i in (3, 4, 5) if abs(waypoints[-1][i] - waypoints[0][i]) > 1)
+        print(f"Unwinding: {names}")
+        for k, q_next in enumerate(waypoints[1:], 1):
+            self.move_j(list(q_next), TURN_SPEED, TURN_ACCEL)
+            yield from self.wait_move(f"unwinding {k}/{len(waypoints) - 1} ({names})")
+        self.start_q = list(self.r.getActualQ())
+        self.rotation = list(self.r.getActualTCPPose()[3:])
+
+    def run(self):
+        # Any start orientation: each pick turns the tool over the start position if it
+        # needs another one, and it turns back to the start orientation at the end
+        self.start = self.r.getActualTCPPose()
+        self.start_q = self.r.getActualQ()        # every tool turn ends near these joints
+        self.rotation = list(self.start[3:])
+        self.check_start()
+        yield from self.unwind()
+        print(f"Glass at {self.glass_xy[0] * 1000:.0f}, {self.glass_xy[1] * 1000:.0f} mm "
+              f"(radius {self.radius * 1000:.0f} mm), place at {self.place_xy[0] * 1000:.0f}, "
+              f"{self.place_xy[1] * 1000:.0f} mm: {' > '.join(self.sequence)}")
+
+        for i, step in enumerate(self.sequence, 1):
+            steps = getattr(self, "step_" + step)()
+            if step not in STATION_STEPS:
+                steps = chain(self.leave_stations(), steps)
+            for status in steps:
+                yield f"{i}/{len(self.sequence)} {step}: {status}"
+
+        # Out of the camera's way
+        start = self.start
+        yield from self.turn(start[3:], "turn tool back")
+        yield from self.move_to([start[0], start[1], max(start[2], self.carry_z)], "back")
+        yield from self.move_to(start[:3], "back")
+        self.status = "done"
+
+
+def connect_sprayer():
+    """(ServoBus, Sprayer) on SPRAYER_PORT, or (None, None) with a warning when SEQUENCE
+    doesn't spray or the board / servo doesn't answer (p is then refused)."""
+    if "spray" not in SEQUENCE:
+        return None, None
+    try:
+        bus = bus_servos.ServoBus(SPRAYER_PORT)
+    except SerialException as e:
+        warn(f"sprayer board on {SPRAYER_PORT} not available ({e}), p will be refused")
+        return None, None
+    servo = bus_servos.BusServo(bus, bus_servos.SPRAYER_ID)
+    if not servo.ping():
+        bus.close()
+        warn(f"sprayer servo {bus_servos.SPRAYER_ID} on {SPRAYER_PORT} not answering, p will be refused")
+        return None, None
+    return bus, bus_servos.Sprayer(servo)
 
 
 def find_place_tag(detector, finder, image):
@@ -485,13 +1275,16 @@ def draw_place(image, finder, place_xy, tag_id, seen):
 
 
 def main():
+    check_sequence(SEQUENCE)     # a SEQUENCE typo fails here, before anything connects
     cap, width, height = fg.open_camera()
+    grabber = FrameGrabber(cap)
     finder = fg.GlassFinder.load(width, height, rim_height=GLASS_HEIGHT)
     detector = fg.make_tag_detector()
     editor = fg.AreaEditor(finder)
     fg.setup_window(editor)
 
     suction = connect_suction()
+    servo_bus, sprayer = connect_sprayer()
     r, c = safe_motion.connect(IP)
     gamepad = GamepadControl(GAMEPAD_KEYS)
     jogger = Jogger(c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
@@ -502,30 +1295,44 @@ def main():
     place_id = None
     tags_in_view = []
     status = "p: pick & place  s: stop  g/r: grip/release  h: home  q: quit"
-    watchdog = RobotWatchdog(c)
+    last_frame = None
+    image = None
+    glasses = []
+    watchdog = RobotWatchdog(c, r)
     try:
         while True:
             if fg.window_closed():
                 break
+            loop_start = time.time()
             try:
-                fg.read_trackbars(finder)
-                image = finder.undistort(fg.read_frame(cap))
+                frame_count, frame = grabber.latest()
+                new_frame = frame_count != last_frame
+                if new_frame:
+                    last_frame = frame_count
+                    fg.read_trackbars(finder)
+                    image = finder.undistort(frame)
                 if not watchdog.kick():
                     if task is not None:
                         task.abort()
                         task = None
                     jogger.stop()
                     status = "robot was stopped (loop stall / protective stop), task aborted"
-                glasses = finder.detect(image)
-                seen = find_place_tag(detector, finder, image)
-                if seen is not None:
-                    place_xy, place_id, tags_in_view = seen
+                seen = None
+                if new_frame and task is None:
+                    # Only between tasks (~40 ms): during one the glass is chosen and the
+                    # tag position kept, and the robot steps run at LOOP_PERIOD instead
+                    glasses = finder.detect(image)
+                    seen = find_place_tag(detector, finder, image)
+                    if seen is not None:
+                        place_xy, place_id, tags_in_view = seen
                 tcp = r.getActualTCPPose()
 
+                pick_now = False             # p pressed at the start, or the start reached after p
                 if task is not None:
                     task.update()
                     status = task.status
                     if task.done:
+                        pick_now = isinstance(task, HomeTask) and task.then_pick and task.arrived
                         task = None
                 # Backstop for moves that got above the ceiling anyway (safe_motion.py)
                 if task is not None and c.over_ceiling():
@@ -533,10 +1340,11 @@ def main():
                     task = None
                     status = warn(f"above the {MAX_TCP_Z:.2f} m ceiling, task stopped (jog down)")
 
-                fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2], place_xy)
-                if place_xy is not None:
-                    draw_place(image, finder, place_xy, place_id, seen is not None)
-                cv2.imshow(fg.WINDOW, image)
+                if new_frame:
+                    fg.draw_overlay(image, finder, editor, glasses, status, tcp[:2], place_xy)
+                    if place_xy is not None:
+                        draw_place(image, finder, place_xy, place_id, seen is not None)
+                    cv2.imshow(fg.WINDOW, image)
 
                 if gamepad.jog_speed() is not None and task is not None:
                     task.abort()
@@ -565,8 +1373,18 @@ def main():
                     elif key == "o":
                         pose = r.getActualTCPPose()
                         rotation = ", ".join(f"{v:.5f}" for v in pose[3:])
+                        # Joints wrapped to +-180 deg: the same arm pose, never wound up
+                        joints = ", ".join(f"{(v + np.pi) % (2 * np.pi) - np.pi:.5f}" for v in r.getActualQ())
+                        if tilt_deg(pose[3:]) <= MAX_TILT_DEG:
+                            status = f"TOP_GRIP_ROTATION = [{rotation}]"
+                            print(f"{status}\nTOP_GRIP_Q = [{joints}]")
+                            continue
                         print(f"SIDE_GRIP_ROTATION = [{rotation}]\n"
-                              f"SIDE_GRIP_HEIGHT = {pose[2] - finder.table_z:.4f}")
+                              f"SIDE_GRIP_Q = [{joints}]\n"
+                              f"SIDE_GRIP_HEIGHT = {pose[2] - finder.table_z:.4f}\n"
+                              f"or, holding a glass in front of the sprayer:\n"
+                              f"SPRAY_POSE = [{', '.join(f'{v:.5f}' for v in pose)}]\n"
+                              f"SPRAY_Q = [{joints}]")
                         side = read_side_orientation(pose)
                         if side is None:
                             status = "o: tool not horizontal, only SIDE_GRIP_ROTATION printed"
@@ -580,21 +1398,30 @@ def main():
                         task = HomeTask(r, c)
                     elif key == "p":
                         jogger.stop()
-                        if place_xy is None:
-                            status = warn(f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} "
-                                          "in view, p ignored")
-                            continue
-                        if PLACE_TAG_ID is None and len(tags_in_view) > 1:
-                            # Not refused: the id of the place tag is not fixed, so the lowest wins
-                            warn(f"tags {tags_in_view} in view, placing on the lowest id {place_id}")
-                        status = "measuring..."
-                        glass = choose_glass(finder.measure(cap, kick=watchdog.kick), place_xy)
-                        if glass is None:
-                            status = warn("no glass found, p ignored")
-                            continue
-                        task_class = SidePickPlaceTask if PICK_FROM_SIDE else PickPlaceTask
-                        task = task_class(r, c, suction, glass, place_xy,
-                                          finder.table_z, GLASS_HEIGHT)
+                        if not GO_TO_START_FIRST or at_start(r):
+                            pick_now = True
+                        else:
+                            # Out of the camera's view first; the pick starts when it arrives
+                            task = HomeTask(r, c, then_pick=True)
+
+                if pick_now and task is None:
+                    if place_xy is None:
+                        status = warn(f"no place tag {PLACE_TAG_ID if PLACE_TAG_ID is not None else ''} "
+                                      "in view, p ignored")
+                        continue
+                    if PLACE_TAG_ID is None and len(tags_in_view) > 1:
+                        # Not refused: the id of the place tag is not fixed, so the lowest wins
+                        warn(f"tags {tags_in_view} in view, placing on the lowest id {place_id}")
+                    status = "measuring..."
+                    glass = choose_glass(finder.measure(grabber, kick=watchdog.kick), place_xy)
+                    if glass is None:
+                        status = warn("no glass found, p ignored")
+                        continue
+                    task = SequenceTask(r, c, suction, glass, place_xy,
+                                        finder.table_z, GLASS_HEIGHT, sprayer=sprayer)
+                # Pace the loop: steps well under SPEED_CMD_TIME apart keep a speedL push
+                # continuous, without spinning the CPU between camera frames
+                time.sleep(max(0.0, LOOP_PERIOD - (time.time() - loop_start)))
             except Exception as e:
                 # Robot fault, lost connection, camera hiccup...: stop and recover in
                 # place. Restarting would also cost the gripper's 2 s serial reset.
@@ -602,6 +1429,7 @@ def main():
                 status = warn(f"error: {e} - stopped, recovering")
                 task = None
                 recover(r, c, watchdog)
+                time.sleep(ERROR_RETRY_DELAY)
                 if cv2.waitKey(1) & 0xFF in (ord("q"), 27):   # keep the window alive, allow quit
                     break
     except KeyboardInterrupt:
@@ -616,7 +1444,10 @@ def main():
             pass
         gamepad.close()
         suction.close()
-        cap.release()
+        if sprayer is not None:
+            sprayer.stop()           # robot already stopped, so waiting for the stroke is fine
+            servo_bus.close()
+        grabber.close()
         cv2.destroyAllWindows()
 
 

@@ -48,7 +48,7 @@ Requires: pip install ur_rtde numpy
 import numpy as np
 
 # --- ceiling --------------------------------------------------------------------
-MAX_TCP_Z = 0.60             # m in base frame, the TCP never goes higher than this
+MAX_TCP_Z = 0.85             # m in base frame, the TCP never goes higher than this (was 0.60, raised on request)
 CEILING_MARGIN = 0.02        # m, over_ceiling() is True this far above MAX_TCP_Z
 CEILING_JOG_GAIN = 2.0       # 1/s, speedL upward speed is capped to gain * distance left to the ceiling
 MOVEJ_CHECK_STEPS = 20       # forward-kinematics samples along a moveJ arc
@@ -109,11 +109,27 @@ class SafeControl:
         xd[2] = min(xd[2], max(0.0, CEILING_JOG_GAIN * (MAX_TCP_Z - self.tcp_z())))
         return self._c.speedL(xd, acceleration, time)
 
+    def getForwardKinematics(self, q=None, tcp_offset=None):
+        """TCP pose at joints q (default: the actual ones) with the active TCP offset.
+
+        ur_rtde 1.6.5 getForwardKinematics(q) without tcp_offset is wrong: its robot
+        script (cmd 45) always reads the offset from input registers 6-11, which then
+        hold whatever the previous command left there (a moveL's speed and accel...).
+        A wrist-3 flip with the TCP on the wrist axis came out 0.45 m high. So the
+        active offset is always passed explicitly.
+        """
+        if q is None:
+            return self._c.getForwardKinematics()
+        if tcp_offset is None:
+            tcp_offset = self._c.getTCPOffset()
+        return self._c.getForwardKinematics(list(q), list(tcp_offset))
+
     def _moveJ_heights(self, q):
         """Highest and final TCP z along a moveJ to q."""
         q0 = np.asarray(self._r.getActualQ(), dtype=float)
         q1 = np.asarray(q, dtype=float)
-        z = [self._c.getForwardKinematics(list(q0 + t * (q1 - q0)))[2]
+        tcp_offset = self._c.getTCPOffset()
+        z = [self.getForwardKinematics(q0 + t * (q1 - q0), tcp_offset)[2]
              for t in np.linspace(0, 1, MOVEJ_CHECK_STEPS + 1)[1:]]
         return max(z), z[-1]
 

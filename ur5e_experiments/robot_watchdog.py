@@ -20,10 +20,13 @@ Things to know (checked in the ur_rtde 1.6 sources):
     kick() re-uploads it, re-arms and returns False, so the caller aborts its
     task and tells the user. The robot does not move again on its own.
   - During a protective stop or e-stop kick() returns False until it is
-    cleared on the pendant, then re-uploads the script as above.
+    cleared on the pendant, then re-uploads the script as above. That state
+    is read from the RTDEReceiveInterface: RTDEControlInterface has no
+    isProtectiveStopped() / isEmergencyStopped() (the first control script
+    stop then raised AttributeError on every loop iteration).
 
 Usage:
-  watchdog = RobotWatchdog(rtde_c)   # right before the main loop
+  watchdog = RobotWatchdog(rtde_c, rtde_r)   # right before the main loop
   while True:
       if not watchdog.kick(): ...    # once per iteration; False = robot was stopped
 
@@ -37,8 +40,10 @@ WATCHDOG_MIN_FREQUENCY = 5.0   # Hz
 
 
 class RobotWatchdog:
-    def __init__(self, rtde_c, min_frequency=WATCHDOG_MIN_FREQUENCY):
+    def __init__(self, rtde_c, rtde_r=None, min_frequency=WATCHDOG_MIN_FREQUENCY):
         self._c = rtde_c
+        # Protective / emergency stop state: RTDEReceiveInterface (the control one lacks it)
+        self._status = rtde_r if rtde_r is not None else rtde_c
         self._min_frequency = min_frequency
         self._waiting_for_clear = False
         self.arm()
@@ -54,7 +59,7 @@ class RobotWatchdog:
         if self._c.isProgramRunning() and self._c.kickWatchdog():
             self._waiting_for_clear = False
             return True
-        if self._c.isProtectiveStopped() or self._c.isEmergencyStopped():
+        if self._status.isProtectiveStopped() or self._status.isEmergencyStopped():
             if not self._waiting_for_clear:
                 print("Robot is protective / emergency stopped, clear it on the pendant")
                 self._waiting_for_clear = True

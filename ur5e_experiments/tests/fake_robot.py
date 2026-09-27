@@ -16,6 +16,19 @@ from system_model import Grip, Outcome, Result
 SIDE = [0.0, pi / 2, 0.0]   # axis-angle: tool z along base +x (horizontal side grip)
 
 
+class AsyncStatus:
+    """rtde_control.AsyncOperationStatus: the count changes on every start and end."""
+
+    def __init__(self, count, running):
+        self._count, self._running = count, running
+
+    def changeCount(self):
+        return self._count
+
+    def isAsyncOperationRunning(self):
+        return self._running
+
+
 class FakeRobot:
     def __init__(self, pose=(0.3, -0.5, 0.35, *SIDE), q=(0, -1.57, 1.57, -1.57, -1.57, 0.5)):
         self.pose = list(pose)
@@ -27,11 +40,15 @@ class FakeRobot:
         self.force_offset = 0.0
         self.stop_short = 0.0       # m, moveL ends this far before its target
         self.calls = []
+        self.fk_offsets = []        # tcp_offset of every getForwardKinematics call
+        self.ik_poses = {}          # joints handed out by getInverseKinematics -> their pose
+        self.ik_calls = []          # (qnear, max position error, max orientation error)
         self.connected = True
         self.program_running = True
         self.protective_stop = False
         self.tcp_offset = [0, 0, 0.2, 0, 0, 0]
         self.speed = 0.0
+        self.async_changes = 0      # AsyncOperationStatus.changeCount
 
     # --- simulation ---------------------------------------------------------------
     def advance(self, dt):
@@ -47,10 +64,14 @@ class FakeRobot:
                 position = position + (delta / distance * end if distance else 0)
                 self.pose[3:] = list(self.target[0][3:])
                 self.target = None
+                self.async_changes += 1
             else:
                 position = position + delta / distance * step
         elif self.joint_target is not None:
             self.q = list(self.joint_target)
+            self.async_changes += 1
+            if tuple(self.q) in self.ik_poses:
+                self.pose = list(self.ik_poses[tuple(self.q)])
             self.joint_target = None
         elif np.any(self.velocity):
             position = position + self.velocity * dt
@@ -76,17 +97,30 @@ class FakeRobot:
     # --- control ------------------------------------------------------------------
     def moveL(self, pose, speed, accel, asynchronous=False):
         self.calls.append(("moveL", list(pose)))
+        self.async_changes += 1
         self.velocity[:] = 0
         self.target = (list(pose), speed)
         return True
 
     def moveJ(self, q, speed, accel, asynchronous=False):
         self.calls.append(("moveJ", list(q)))
+        self.async_changes += 1
         self.joint_target = list(q)
         return True
 
-    def getForwardKinematics(self, q=None):
+    def getForwardKinematics(self, q=None, tcp_offset=None):
+        self.fk_offsets.append(tcp_offset)
+        if q is not None and tuple(q) in self.ik_poses:
+            return list(self.ik_poses[tuple(q)])
         return list(self.pose)
+
+    def getInverseKinematics(self, x, qnear=None, max_position_error=None, max_orientation_error=None):
+        """Joints near qnear, unique per call, that reach x when moved to."""
+        self.ik_calls.append((qnear, max_position_error, max_orientation_error))
+        q = list(qnear if qnear else self.q)
+        q[0] += 1e-6 * (len(self.ik_poses) + 1)
+        self.ik_poses[tuple(q)] = list(x)
+        return q
 
     def speedL(self, xd, accel, time):
         assert time > 0, "speedL time must be > 0"
@@ -104,6 +138,9 @@ class FakeRobot:
     def stopJ(self, accel=10.0, asynchronous=False):
         self.calls.append(("stopJ", asynchronous))
         self.joint_target = None
+
+    def getAsyncOperationProgressEx(self):
+        return AsyncStatus(self.async_changes, self.target is not None or self.joint_target is not None)
 
     def getAsyncOperationProgress(self):
         return 0 if (self.target is not None or self.joint_target is not None) else -1

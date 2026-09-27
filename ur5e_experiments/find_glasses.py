@@ -119,7 +119,7 @@ from robot_watchdog import RobotWatchdog
 
 # --- camera -------------------------------------------------------------------
 
-OVERHEAD_CAMERA_INDEX = 2
+OVERHEAD_CAMERA_INDEX = 0
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 CAMERA_HFOV_DEG = 70.0   # only used when there is no intrinsics file
@@ -837,7 +837,7 @@ def calibrate(args):
     points, pending = load_progress(width, height, args.fresh)
     freedrive = False
     status = "Robot out of view, SPACE / A: measure tags"
-    watchdog = RobotWatchdog(rtde_c)
+    watchdog = RobotWatchdog(rtde_c, rtde_r)
     try:
         while True:
             image = undistort(read_frame(cap))
@@ -946,7 +946,7 @@ def run(args):
     setup_window(editor)
     status = ("p: measure  " + ("m: move above glass  s: stop  t: tip as corner  " if args.robot else "")
               + "area: drag / u: undo / x: clear   q: quit")
-    watchdog = RobotWatchdog(rtde_c) if rtde_c else None
+    watchdog = RobotWatchdog(rtde_c, rtde_r) if rtde_c else None
     try:
         while True:
             if window_closed():

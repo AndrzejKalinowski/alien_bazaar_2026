@@ -123,3 +123,45 @@ def test_sign_magnitude_round_trip(value):
 
 def test_sign_magnitude_clamps_the_magnitude():
     assert bs._from_sign_magnitude(bs._to_sign_magnitude(-100000)) == -32767
+
+
+class DeadServo:
+    def move_to(self, degrees, speed=None, acceleration=None):
+        raise TimeoutError("no reply from servo")
+
+
+def test_sprayer_reports_a_servo_that_stops_answering():
+    sprayer = bs.Sprayer(DeadServo(), period=0.01, hold=0.0)
+    sprayer.start(count=3)
+    sprayer.wait()
+    assert not sprayer.running
+    assert isinstance(sprayer.error, TimeoutError) and sprayer.strokes == 0
+    sprayer.request_stop()                      # never blocks, also after the thread ended
+
+
+class ControlOnly(FakeControl):
+    """Like the real RTDEControlInterface: no protective / emergency stop state."""
+    isProtectiveStopped = property(lambda self: (_ for _ in ()).throw(AttributeError("isProtectiveStopped")))
+    isEmergencyStopped = property(lambda self: (_ for _ in ()).throw(AttributeError("isEmergencyStopped")))
+
+
+class Receive:
+    def __init__(self):
+        self.protective_stop = False
+
+    def isProtectiveStopped(self):
+        return self.protective_stop
+
+    def isEmergencyStopped(self):
+        return False
+
+
+def test_watchdog_reads_the_stop_state_from_the_receive_interface():
+    c, r = ControlOnly(), Receive()
+    watchdog = RobotWatchdog(c, r)
+    c.running, r.protective_stop = False, True
+    assert watchdog.kick() is False                 # no AttributeError, waits for the clear
+    assert "reupload" not in c.calls
+    r.protective_stop = False
+    assert watchdog.kick() is False                 # re-uploads now
+    assert watchdog.kick() is True
