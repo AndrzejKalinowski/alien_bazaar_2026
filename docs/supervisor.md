@@ -1,9 +1,11 @@
-# Supervisor — pierwszy działający etap
+# Supervisor: etapy 1–2 (rdzeń, panel WWW, kamera)
 
 Implementacja bazuje na `master` (`7c145d2`), na gałęzi
 `feature/system-supervisor`. Rdzeń realizuje pełny cykl na symulowanych
-urządzeniach. Żaden nowy moduł nie otwiera RTDE, portu szeregowego ani kamery.
-Detekcja różnicowa nie jest importowana ani przenoszona do tej gałęzi.
+urządzeniach i jest sterowany z CLI albo z panelu w przeglądarce.
+Żaden moduł supervisora nie otwiera RTDE ani portu szeregowego. Kamerę
+otwiera wyłącznie jawny tryb `--camera`. Detekcja różnicowa nie jest
+importowana ani przenoszona do tej gałęzi.
 
 ## Uruchomienie
 
@@ -47,6 +49,81 @@ celu i operacji. Końcowy stan jest wypisywany jako JSON.
 | 3 | Brak wolnych miejsc odbioru; runner kończy demonstrację w tym stanie |
 | 4 | Potwierdzone zatrzymanie przez operatora |
 | 5 | Partia rozliczona, ale część celów została pominięta |
+
+## Panel WWW
+
+```powershell
+python ur5e_experiments/system_main.py --simulate --web --step-time 0.3
+```
+
+Program wypisuje link `http://127.0.0.1:8765/#token=…`. Token trafia do
+pamięci sesji karty i zostaje usunięty z paska adresu. Podgląd działa bez
+tokenu. START, STOP, RESET, opróżnienie odbioru i dodanie szklanek wymagają
+go w nagłówku `X-Supervisor-Token`. Wymagane jest też ciało JSON i zgodny
+`Origin`. Domyślnie serwer słucha tylko na `127.0.0.1`. Dostęp z sieci LAN
+wymaga jawnego `--host 0.0.0.0`; transmisja HTTP jest nieszyfrowana, więc
+token chroni tylko przed przypadkowym sterowaniem. Drugi supervisor na tym
+samym porcie nie uruchomi się, bo gniazdo jest otwierane na wyłączność.
+
+Panel pokazuje stan, bieżącą operację, postęp receptury, liczniki partii,
+miejsca odbioru z potwierdzaniem opróżnienia, listę szklanek, dziennik zdarzeń
+oraz mapę fikcyjnego świata symulacji. Przycisk dodaje szklanki na wolnych
+fikcyjnych pozycjach wejściowych. Przy utracie aktualnych danych (powyżej 2 s)
+panel oznacza połączenie jako nieaktualne i blokuje przyciski poza STOP.
+Zamknięcie przeglądarki nie przerywa partii; ponowne otwarcie odtwarza stan.
+Ctrl+C w konsoli zatrzymuje urządzenia i dopiero potem kończy program.
+
+Serwer nie wywołuje metod nadzorcy. `ControlLoop` jest jego jedynym
+właścicielem i w każdym takcie wykonuje kolejno: oczekujący STOP, najwyżej
+jedno polecenie z kolejki (16 miejsc; przepełnienie daje odmowę), `tick()`
+oraz publikację zdarzeń i stanu. STOP ma osobną flagę priorytetową i anuluje
+polecenia zakolejkowane przed nim, także START. HTTP 202 oznacza przyjęcie do
+kolejki. Wynik nadzorcy zwraca `GET /api/commands/{id}`. START z tym samym
+`request_id` nie tworzy drugiej partii. Stan przychodzi przez Server-Sent
+Events zamiast WebSocketu: dane płyną tylko do przeglądarki, a polecenia
+i tak idą przez HTTP. Wolny klient blokuje wyłącznie swój wątek.
+Nie ma zależności poza biblioteką standardową Pythona.
+
+| Interfejs | Działanie |
+| --- | --- |
+| `GET /api/status` | Pełny stan, także po odświeżeniu |
+| `GET /api/events` | SSE: zdarzenia nadzorcy i stan co 0,5 s |
+| `GET /api/commands/{id}` | `queued`, `done` (z odpowiedzią nadzorcy), `cancelled` |
+| `GET /camera.mjpg` | Ostatnia klatka z opisem detekcji (tylko `--camera`) |
+| `POST /api/batch/start` | `{"request_id": "…"}` |
+| `POST /api/stop` | Priorytetowe zatrzymanie |
+| `POST /api/fault/reset` | Kontrolowany powrót do `READY`, bez ruchu |
+| `POST /api/output/confirm-cleared` | `{"slot_ids": ["tag-1"]}` |
+| `POST /api/sim/add-glasses` | `{"count": 3}`, tylko fikcyjne cele |
+
+## Kamera: klasyczna detekcja z `master`
+
+```powershell
+python ur5e_experiments/system_main.py --simulate --web --camera
+```
+
+Szklanki pochodzą z kamery nad stołem. Robot, chwytak i stanowiska pozostają
+symulowane. Wymaga OpenCV, NumPy i plików kalibracji `find_glasses.py`
+(`overhead_camera_calibration.npz`, `overhead_camera_pose.npz`). Indeks
+kamery, rozdzielczość i obszar detekcji (`detection_area.json`) pochodzą
+z `find_glasses.py`. Obszar musi obejmować tylko strefę wejściową, bez
+stanowisk i tagów odbioru. Szklanki muszą stać otworem do góry.
+
+`system_vision.py` czyta klatki we własnym wątku. Z klatek w oknie 0,3 s
+tworzy jeden pomiar: szklanka musi być wykryta w co najmniej połowie
+klatek okna. Mniej niż 5 klatek w oknie nie daje pomiaru; obraz staje się
+nieaktualny, a nadzorca zatrzymuje partię. Dzięki temu trzy kolejne pomiary
+bez celu oznaczają około 1 s nieobecności, a nie trzy klatki. ID szklanki
+przechodzi na kolejne okno, jeżeli przesunęła się o najwyżej 3 cm. Większy
+skok daje nowe ID, a stary cel zostanie pominięty. Niejednoznaczne
+dopasowania są pomijane w danym pomiarze. Nadzorca nie odczytuje kamery
+i nie czeka na nią; `observe()` zwraca ostatni opublikowany pomiar.
+
+Na prawdziwym stole podniesiona w symulacji szklanka nadal stoi. Bieżąca
+partia rozlicza ją raz; następny START obejmie ją ponownie. Ten tryb nie
+był jeszcze uruchomiony z kamerą: przetestowano go wyłącznie offline.
+
+## Tryb sprzętowy
 
 Flaga `--simulate` jest obowiązkowa. Tryb sprzętowy nie jest jeszcze
 zaimplementowany; program nie przełącza się do niego automatycznie.
@@ -138,9 +215,11 @@ adaptera muszą pochodzić z konfiguracji `SafeControl`, bez ich zwiększania.
 | `system_simulator.py` | Logiczne urządzenia i wstrzykiwanie błędów |
 | `system_geometry.py` | Bryły stanowisk, otoczka narzędzia, kontrola całych odcinków i wysokości przejazdu |
 | `system_settings.py` | Parametry czasowe, bez nowych limitów ruchu fizycznego |
+| `system_web.py`, `web/` | Pętla właściciela nadzorcy, kolejka poleceń, serwer HTTP/SSE/MJPEG, panel |
+| `system_vision.py` | Okna pomiarowe, stabilne ID szklanek, wątek kamery z `GlassFinder` |
 
-Nadzorca ma jednego właściciela. Przyszły panel przekaże mu komendy kolejką;
-nie wolno wywoływać jego metod równolegle z kilku wątków. `DeviceAdapter`
+Nadzorca ma jednego właściciela: `ControlLoop`. Panel przekazuje mu komendy
+kolejką; nie wolno wywoływać metod nadzorcy równolegle z kilku wątków. `DeviceAdapter`
 określa rozpoczęcie/polling operacji, obserwację, telemetrię i oddzielne
 potwierdzenie STOP oraz walidację dokładnej planowanej drogi. Implementacje sprzętowe muszą zwracać szybko i weryfikować
 warunki fizyczne, zamiast zgłaszać sukces po wysłaniu komendy.
@@ -158,10 +237,19 @@ Testy geometrii sprawdzają również przecięcie stanowiska pomiędzy wolnymi
 końcami ruchu, otoczkę podczas obrotu, granicę marginesu, pionowe odcinki,
 limity wysokości, dostęp do korytarzy i blokowanie niezweryfikowanego ruchu.
 
-Następny etap według [planu](system_supervisor_plan.md): klasyczna wizja
-z `master` oraz panel WWW sterujący symulacją. Następnie adaptery urządzeń,
-nauka stanowisk i walidacja pojedynczej szklanki. Rozdzielenie procesów,
-watchdog rzeczywistego robota, geometria obrotu, sprzętowe profile operacji,
-trwała zajętość miejsc po restarcie i blokada drugiej instancji pozostają do
-implementacji. Nowe uruchomienie symulatora tworzy nowy fikcyjny świat;
+Testy panelu obejmują: kolejność STOP przed poleceniami, anulowanie
+zakolejkowanego START, idempotencję, przepełnienie kolejki, odmowę błędnych
+akcji, token, `Origin`, typ treści, SSE, MJPEG, zajęty port i zatrzymanie
+urządzeń przy zamykaniu. Serwer HTTP w testach działa na porcie efemerycznym
+w pętli zwrotnej. Testy wizji sprawdzają okna, mediany, odrzucanie odbić,
+utrzymanie i zmianę ID, niejednoznaczność, limit śledzonych celów oraz
+zewnętrzne źródło sceny symulatora. Kamera nie jest otwierana w testach.
+
+Następny etap według [planu](system_supervisor_plan.md) to etap 3: adaptery
+urządzeń (`SafeControl` + watchdog w `ControlLoop`, obsługa portów chwytaka
+i magistrali serw poza pętlą), walidacja konfiguracji i nauka stanowisk
+z panelu. Potem walidacja pojedynczej szklanki. Pozostają też: próba
+`--camera` na prawdziwym stole, rozdzielenie kamery i panelu do osobnych
+procesów, geometria obrotu, sprzętowe profile operacji, trwała zajętość
+miejsc po restarcie oraz blokada drugiej instancji niezależna od portu. Nowe uruchomienie symulatora tworzy nowy fikcyjny świat;
 dziennik nie służy do automatycznego wznawiania ruchu.

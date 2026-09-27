@@ -346,6 +346,7 @@ class Supervisor:
             "counts": self.batch.summary() if self.batch else {},
             "target_id": self.item.target.id if self.item else None,
             "operation": self.command.step.value if self.command else None,
+            "step_index": self.step_index if self.item else None,
             "stop_confirmed": self._stop_confirmed,
             "outputs": self.outputs.snapshot(),
             "targets": [{"id": item.target.id, "state": item.state.value, "detail": item.detail}

@@ -1,10 +1,20 @@
-"""Run the first supervisor milestone: a complete batch with simulated devices.
+"""Run the supervisor with simulated devices, from the CLI or the web panel.
 
 From the repository root:
     python ur5e_experiments/system_main.py --simulate --fast
     python ur5e_experiments/system_main.py --simulate --glasses 3 --slots 1
     python ur5e_experiments/system_main.py --simulate --fast --fail-at SPONGE
     python ur5e_experiments/system_main.py --simulate --fast --stop-at WIPE
+    python ur5e_experiments/system_main.py --simulate --web
+    python ur5e_experiments/system_main.py --simulate --web --camera
+
+--web serves the panel (system_web.py) and waits for START from the browser;
+it prints the panel link with the control token. --host 0.0.0.0 opens it to
+the LAN (plain HTTP, token-protected commands). --step-time slows the fake
+operations so the cycle can be followed. The panel can add fictional glasses.
+--camera takes the targets from the overhead camera with the classic detector
+(system_vision.py, needs OpenCV and the overhead calibration); the robot,
+gripper and stations stay simulated. Ctrl+C stops the devices, then exits.
 
 --simulate is required. There is no hardware mode and no implicit connection
 to robot, camera or serial ports. --fast advances a virtual monotonic clock.
@@ -15,7 +25,8 @@ Without it the same fake sequence runs in wall time; Ctrl+C requests STOP.
 
 Exit codes: 0 complete (all glasses done), 1 runtime/logging error, 2 fault or
 invalid arguments, 3 output full, 4 stopped, 5 complete with skipped targets.
-This runner intentionally has no GUI or network server yet.
+With --web: 0 after Ctrl+C with confirmed stopped devices, 1 start-up error
+(e.g. port in use: another supervisor is running), 2 fault or loop failure.
 Paths are checked against fictional station bounds and a tool/glass envelope;
 these example dimensions are not a calibration for real hardware.
 Requires: Python 3.12+ standard library only.
@@ -26,13 +37,15 @@ from contextlib import ExitStack
 import json
 from pathlib import Path
 import sys
+import threading
 from time import monotonic, sleep
 
 from system_batch import OutputSlot
 from system_controller import Supervisor
-from system_model import GlassTarget, SlotState, State, Step
-from system_settings import STOP_TIMEOUT, TICK_PERIOD
+from system_model import GlassTarget, Reply, SlotState, State, Step
+from system_settings import SIM_OPERATION_TIME, STOP_TIMEOUT, TICK_PERIOD
 from system_simulator import SimulatedDevices, SimulationClock
+import system_web
 
 
 def positive_count(value):
@@ -40,6 +53,82 @@ def positive_count(value):
     if not 1 <= value <= 1000:
         raise argparse.ArgumentTypeError("count must be between 1 and 1000")
     return value
+
+
+def step_time(value):
+    value = float(value)
+    if not 0 <= value <= 10:
+        raise argparse.ArgumentTypeError("step time must be 0..10 s")
+    return value
+
+
+def port_number(value):
+    value = int(value)
+    if not 1 <= value <= 65535:
+        raise argparse.ArgumentTypeError("port must be 1..65535")
+    return value
+
+
+def open_journal(stack, path):
+    return stack.enter_context(path.open("x", encoding="utf-8")) if path else None
+
+
+def run_web(args, targets, slots):
+    frames = vision = None
+    try:
+        with ExitStack() as stack:
+            journal = open_journal(stack, args.journal)
+            if args.camera:
+                from system_vision import CameraVision  # OpenCV only in camera mode
+                frames = system_web.FrameHub()
+                vision = CameraVision(frames)
+                vision.start()
+                stack.callback(vision.close)
+                stack.callback(frames.close)
+            devices = SimulatedDevices([] if args.camera else targets, operation_time=args.step_time,
+                                       fail_at=Step(args.fail_at) if args.fail_at else None,
+                                       scene_source=vision)
+            supervisor = Supervisor(devices, slots)
+
+            def add_glasses(payload):
+                return Reply(True, "added " + ", ".join(devices.add_targets(payload.get("count"))))
+
+            def write_events(events):
+                for event in events:
+                    journal.write(json.dumps(event, ensure_ascii=True) + "\n")
+                if events:
+                    journal.flush()
+
+            loop = system_web.ControlLoop(
+                supervisor, actions={} if args.camera else {"add_glasses": add_glasses},
+                world=devices.snapshot, sinks=[write_events] if journal else ())
+            server = system_web.serve(loop, args.host, args.port, args.token, frames)
+            stack.callback(server.server_close)
+            owner = threading.Thread(target=loop.run, name="supervisor-owner")
+            owner.start()
+            threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
+            host = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
+            print(f"Panel: http://{host}:{server.server_address[1]}/#token={server.token}", flush=True)
+            if args.host not in ("127.0.0.1", "localhost", "::1"):
+                print("WARNING: panel reachable from the network over plain HTTP; "
+                      "only the token protects the controls.", file=sys.stderr, flush=True)
+            try:
+                while owner.is_alive():
+                    owner.join(0.2)
+            except KeyboardInterrupt:
+                print("Stopping devices...", file=sys.stderr, flush=True)
+            finally:
+                loop.shutdown()
+                owner.join()
+                server.shutdown()
+            print(json.dumps(loop.status(), ensure_ascii=True))
+            if loop.error or supervisor.state == State.FAULT:
+                print(loop.error or supervisor.fault, file=sys.stderr)
+                return 2
+            return 0
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"supervisor runner: {exc}", file=sys.stderr)
+        return 1
 
 
 def main(argv=None):
@@ -54,12 +143,30 @@ def main(argv=None):
     parser.add_argument("--auto-clear-output", action="store_true")
     parser.add_argument("--journal", type=Path)
     parser.add_argument("--quiet", action="store_true")
+    web = parser.add_argument_group("web panel")
+    web.add_argument("--web", action="store_true", help="serve the panel and wait for START")
+    web.add_argument("--host", default=system_web.DEFAULT_HOST)
+    web.add_argument("--port", type=port_number, default=system_web.DEFAULT_PORT)
+    web.add_argument("--token", help="control token (default: random per run)")
+    web.add_argument("--camera", action="store_true", help="targets from the overhead camera")
+    web.add_argument("--step-time", type=step_time, default=SIM_OPERATION_TIME,
+                     help="s per simulated operation")
     args = parser.parse_args(argv)
+    if args.web:
+        if args.fast or args.stop_at or args.auto_clear_output:
+            parser.error("--fast, --stop-at and --auto-clear-output are CLI-only; use the panel")
+        if args.token is not None and not system_web.valid_id(args.token):
+            parser.error("--token must be 1..100 printable characters")
+    elif args.camera or args.token is not None:
+        parser.error("--camera and --token need --web")
 
     clock = SimulationClock() if args.fast else monotonic
     targets = [GlassTarget(f"glass-{i + 1}", 0.1 + i * 0.1, -0.4) for i in range(args.glasses)]
     slots = [OutputSlot(f"tag-{i + 1}", SlotState.FREE) for i in range(args.slots)]
-    devices = SimulatedDevices(targets, fail_at=Step(args.fail_at) if args.fail_at else None)
+    if args.web:
+        return run_web(args, targets, slots)
+    devices = SimulatedDevices(targets, operation_time=args.step_time,
+                               fail_at=Step(args.fail_at) if args.fail_at else None)
     supervisor = Supervisor(devices, slots, clock)
     stop_sent = False
 
@@ -79,7 +186,7 @@ def main(argv=None):
 
     try:
         with ExitStack() as stack:
-            journal = stack.enter_context(args.journal.open("x", encoding="utf-8")) if args.journal else None
+            journal = open_journal(stack, args.journal)
 
             def flush_events():
                 for event in supervisor.drain_events():

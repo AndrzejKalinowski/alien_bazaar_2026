@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Supervisor mycia</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Supervisor mycia szklanek</h1>
+  <span id="mode" class="tag"></span>
+  <span id="link" class="tag bad">brak połączenia</span>
+</header>
+
+<main>
+  <section class="panel" id="control">
+    <div class="state-row">
+      <span id="state" class="state">—</span>
+      <span id="operation" class="muted"></span>
+    </div>
+    <p id="fault" class="fault" hidden></p>
+    <p id="loop-warning" class="fault" hidden></p>
+    <div class="buttons">
+      <button id="start" class="go">START</button>
+      <button id="stop" class="stop">STOP</button>
+      <button id="reset">RESET błędu</button>
+    </div>
+    <p id="reply" class="muted" aria-live="polite"></p>
+    <details id="token-box">
+      <summary>Token sterowania</summary>
+      <p class="muted">Podgląd działa bez tokenu. START, STOP i RESET wymagają tokenu
+        wypisanego przy uruchomieniu (link <code>#token=…</code>).</p>
+      <input id="token" type="password" autocomplete="off" placeholder="token">
+    </details>
+  </section>
+
+  <section class="panel" id="progress">
+    <h2>Partia</h2>
+    <p id="counts" class="muted">brak partii</p>
+    <ol id="recipe" class="recipe"></ol>
+  </section>
+
+  <section class="panel wide" id="view">
+    <h2 id="view-title">Podgląd</h2>
+    <img id="camera" alt="obraz z kamery nad stołem" hidden>
+    <p id="camera-stale" class="fault" hidden>Obraz nieaktualny</p>
+    <canvas id="map" width="720" height="420" hidden></canvas>
+    <p id="map-note" class="muted" hidden>Mapa świata symulacji; wymiary fikcyjne.</p>
+    <div id="sim-tools" class="buttons" hidden>
+      <label>Dodaj szklanki <input id="add-count" type="number" min="1" max="12" value="3"></label>
+      <button id="add">Dodaj</button>
+    </div>
+  </section>
+
+  <section class="panel" id="outputs-panel">
+    <h2>Miejsca odbioru</h2>
+    <table>
+      <thead><tr><th></th><th>Miejsce</th><th>Stan</th><th>Szklanka</th></tr></thead>
+      <tbody id="outputs"></tbody>
+    </table>
+    <button id="clear">Potwierdź opróżnienie zaznaczonych</button>
+  </section>
+
+  <section class="panel" id="targets-panel">
+    <h2>Szklanki w partii</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Stan</th><th>Uwagi</th></tr></thead>
+      <tbody id="targets"></tbody>
+    </table>
+  </section>
+
+  <section class="panel wide" id="log-panel">
+    <h2>Zdarzenia</h2>
+    <ol id="log" class="log" reversed></ol>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

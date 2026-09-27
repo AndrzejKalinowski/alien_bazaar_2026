@@ -7,14 +7,16 @@ The current demo: an **overhead camera finds glasses** on the table, the robot *
 Background on the event, rules and other teams: [docs/brief.md](docs/brief.md).
 Known bugs and suggested improvements: [AUDIT.md](AUDIT.md).
 
-The washing-system supervisor now has an **offline first milestone**: a
-tick-driven batch controller with simulated robot, gripper and station drives,
-output reservations, STOP/fault handling, station-height clearance checks on
-a fictional layout, and JSONL events. Run
-`python ur5e_experiments/system_main.py --simulate --fast` from the repository
-root. See [supervisor usage and current scope](docs/supervisor.md) and the
-[implementation plan](docs/system_supervisor_plan.md). Hardware adapters,
-camera integration and the web panel are subsequent milestones.
+The washing-system supervisor is a tick-driven batch controller. It has
+simulated robot, gripper and station drives, output reservations, STOP/fault
+handling, station-height clearance checks on a fictional layout and JSONL events.
+It also has a browser panel (START/STOP/RESET, batch progress, outputs and
+live events) and an optional classic overhead-camera observer. From the
+repository root, run `python ur5e_experiments/system_main.py --simulate --fast`
+(CLI) or `python ur5e_experiments/system_main.py --simulate --web` (panel). See
+[supervisor usage and current scope](docs/supervisor.md) and the
+[implementation plan](docs/system_supervisor_plan.md). Hardware adapters for
+the robot, gripper and servos are the next milestone.
 
 ---
 
