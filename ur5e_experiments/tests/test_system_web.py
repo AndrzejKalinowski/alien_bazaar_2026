@@ -20,7 +20,6 @@ from system_web import COMMAND_QUEUE_SIZE, ControlLoop, FrameHub, serve
 from system_settings import TICK_PERIOD
 from system_simulator import SimulatedDevices, SimulationClock
 
-TOKEN = "test-token"
 
 
 def make_loop(count=2, capacity=None, clock=None, **device_options):
@@ -151,7 +150,7 @@ def panel():
     loop, devices, _ = make_loop(count=2, clock=time.monotonic, operation_time=0.0)
     frames = FrameHub()
     loop.period = 0.002  # s, faster than TICK_PERIOD so the test batch is quick
-    server = serve(loop, "127.0.0.1", 0, TOKEN, frames)
+    server = serve(loop, "127.0.0.1", 0, frames)
     owner = threading.Thread(target=loop.run, daemon=True)
     owner.start()
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
@@ -166,7 +165,7 @@ def panel():
 def request(server, method, path, body=None, headers=None):
     connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
     data = None if body is None else json.dumps(body)
-    base = {"Content-Type": "application/json", "X-Supervisor-Token": TOKEN} if method == "POST" else {}
+    base = {"Content-Type": "application/json"} if method == "POST" else {}
     connection.request(method, path, data, {**base, **(headers or {})})
     response = connection.getresponse()
     payload = response.read()
@@ -196,12 +195,10 @@ def test_panel_page_and_status_are_served_with_security_headers(panel):
 
 
 @pytest.mark.parametrize("headers,code", [
-    ({"X-Supervisor-Token": ""}, 403),
-    ({"X-Supervisor-Token": "wrong"}, 403),
     ({"Origin": "http://evil.example"}, 403),
     ({"Content-Type": "text/plain"}, 415),
 ])
-def test_commands_need_token_same_origin_and_json(panel, headers, code):
+def test_commands_need_same_origin_and_json(panel, headers, code):
     loop, devices, server, _ = panel
     response, _ = request(server, "POST", "/api/batch/start", {"request_id": "x"}, headers)
     assert response.status == code
@@ -278,7 +275,7 @@ def test_mjpeg_stream_sends_the_latest_frame(panel):
 def test_second_server_on_the_same_port_fails(panel):
     loop, _, server, _ = panel
     with pytest.raises(OSError):
-        serve(loop, "127.0.0.1", server.server_address[1], TOKEN)
+        serve(loop, "127.0.0.1", server.server_address[1])
 
 
 def test_shutdown_stops_a_running_batch_before_the_loop_ends():
@@ -318,7 +315,7 @@ def test_shutdown_with_unconfirmed_stop_ends_in_fault():
 
 
 def test_web_cli_options_are_checked(capsys):
-    for options in (["--web", "--fast"], ["--web", "--stop-at", "WIPE"], ["--camera"], ["--token", "x"]):
+    for options in (["--web", "--fast"], ["--web", "--stop-at", "WIPE"], ["--camera"]):
         with pytest.raises(SystemExit) as error:
             main(["--simulate", *options])
         assert error.value.code == 2

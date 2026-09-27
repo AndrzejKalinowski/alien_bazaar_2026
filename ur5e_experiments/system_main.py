@@ -11,8 +11,8 @@ From the repository root:
     python ur5e_experiments/system_main.py --hardware --web --camera
 
 --web serves the panel (system_web.py) and waits for START from the browser;
-it prints the panel link with the control token. --host 0.0.0.0 opens it to
-the LAN (plain HTTP, token-protected commands). --step-time slows the fake
+it prints the panel link. --host 0.0.0.0 opens it to the LAN (plain HTTP,
+no authentication: anyone on the network can control it). --step-time slows the fake
 operations so the cycle can be followed. The panel can add fictional glasses.
 --camera takes the targets from the overhead camera with the classic detector
 (system_vision.py, needs OpenCV and the overhead calibration); the robot,
@@ -22,8 +22,9 @@ Exactly one of --simulate / --hardware is required; nothing connects by default.
 --hardware (system_hardware.py, NOT YET TRIED ON THE ROBOT) connects the UR5e
 through SafeControl, the gripper and the servo bus, and needs --web. The arm
 can move once it has started. It needs --camera for batches; --teach adds
-freedrive, manual grip/release and pose capture to the panel (outside
-batches), to fill system_teach.json. Output places start UNKNOWN: confirm
+freedrive, manual grip/release, pose capture and a test flip (wrist 3 turned
+in place, needs no taught poses) to the panel (outside batches), to fill
+system_teach.json. Output places start UNKNOWN: confirm
 them empty in the panel. START stays refused while the teach file or layout
 is incomplete, the TCP offset changed, or freedrive is on.
 --fast advances a virtual monotonic clock.
@@ -122,7 +123,7 @@ def run_web(args, targets, slots):
                 loop = system_web.ControlLoop(
                     supervisor, actions={} if args.camera else {"add_glasses": add_glasses},
                     world=devices.snapshot, sinks=sinks)
-            server = system_web.serve(loop, args.host, args.port, args.token, frames)
+            server = system_web.serve(loop, args.host, args.port, frames)
             stack.callback(server.server_close)
             if args.hardware:
                 devices.arm()  # watchdog: the owner loop must start right now
@@ -130,10 +131,10 @@ def run_web(args, targets, slots):
             owner.start()
             threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
             host = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
-            print(f"Panel: http://{host}:{server.server_address[1]}/#token={server.token}", flush=True)
+            print(f"Panel: http://{host}:{server.server_address[1]}/", flush=True)
             if args.host not in ("127.0.0.1", "localhost", "::1"):
                 print("WARNING: panel reachable from the network over plain HTTP; "
-                      "only the token protects the controls.", file=sys.stderr, flush=True)
+                      "anyone who can reach it can control the cell.", file=sys.stderr, flush=True)
             try:
                 while owner.is_alive():
                     owner.join(0.2)
@@ -171,7 +172,6 @@ def main(argv=None):
     web.add_argument("--web", action="store_true", help="serve the panel and wait for START")
     web.add_argument("--host", default=system_web.DEFAULT_HOST)
     web.add_argument("--port", type=port_number, default=system_web.DEFAULT_PORT)
-    web.add_argument("--token", help="control token (default: random per run)")
     web.add_argument("--camera", action="store_true", help="targets from the overhead camera")
     web.add_argument("--step-time", type=step_time, default=SIM_OPERATION_TIME,
                      help="s per simulated operation")
@@ -189,10 +189,8 @@ def main(argv=None):
     if args.web:
         if args.fast or args.stop_at or args.auto_clear_output:
             parser.error("--fast, --stop-at and --auto-clear-output are CLI-only; use the panel")
-        if args.token is not None and not system_web.valid_id(args.token):
-            parser.error("--token must be 1..100 printable characters")
-    elif args.camera or args.token is not None:
-        parser.error("--camera and --token need --web")
+    elif args.camera:
+        parser.error("--camera needs --web")
 
     clock = SimulationClock() if args.fast else monotonic
     targets = [GlassTarget(f"glass-{i + 1}", 0.1 + i * 0.1, -0.4) for i in range(args.glasses)]

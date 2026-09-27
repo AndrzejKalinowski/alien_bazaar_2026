@@ -28,6 +28,12 @@ turn of wrist 3 only (moveJ, checked by SafeControl against the ceiling):
 the TCP and the glass centre stay in place. It needs a TCP offset without x/y.
 The tool+glass sphere of the layout must cover the glass in every orientation.
 
+Test flip (--teach, outside batches): the same wrist-3 turn and checks as
+FLIP, but where the arm stands, without a teach file or layout, so the flip
+can be tried before anything else is taught. Pressing it again turns back.
+Nothing checks the surroundings: the operator places the arm with room for
+the gripper and glass to turn. STOP in the panel cancels it.
+
 STOP: pending jobs are invalidated first, then speedStop + stopL/stopJ
 (async) and the servo stop; the stop is acknowledged only when the TCP speed
 is below STOPPED_SPEED, no async move runs and the servos report stopped.
@@ -287,6 +293,8 @@ class HardwareDevices:
         self.moving_joints = False
         self.freedrive = False
         self.command_id = None
+        self.test_status = ""
+        self._test = None        # FlipWrist started from the teach panel
         self._prepared = None
         self._active = None      # [plan, index, action started]
         self._stop = None        # (stop_id, servo stop id)
@@ -321,12 +329,16 @@ class HardwareDevices:
                 self.robot_fault = "TCP above the ceiling"
         except Exception as exc:
             self.robot_fault = f"robot: {exc}"
+        self._poll_test(now)
 
     # --- DeviceAdapter ----------------------------------------------------------------
 
     def _robot_stopped(self):
         speed = float(np.linalg.norm(self.r.getActualTCPSpeed()[:3]))
         return speed < STOPPED_SPEED and self.c.getAsyncOperationProgress() < 0
+
+    def _idle(self):
+        return self._active is None and self._test is None and self._robot_stopped()
 
     def telemetry(self, now):
         g, s = self.gripper.snapshot(), self.servos.snapshot()
@@ -337,7 +349,7 @@ class HardwareDevices:
                  or ("not ready: " + "; ".join(self.config_problems) if self.config_problems else ""))
         observed_at = min(now, g["observed_at"], s["observed_at"])
         return Telemetry(observed_at, connected, g["grip"], self.supported,
-                         self._active is None and self._robot_stopped(), s["stopped"], fault)
+                         self._idle(), s["stopped"], fault)
 
     def observe(self, now):
         if self.vision is None:
@@ -346,6 +358,8 @@ class HardwareDevices:
 
     def validate_motion(self, command):
         self._prepared = None
+        if self._test is not None:
+            raise CollisionRefused("a test flip is running")
         if self.workspace is None:
             raise CollisionRefused("not ready: " + "; ".join(self.config_problems))
         start = list(self.r.getActualTCPPose())
@@ -356,7 +370,7 @@ class HardwareDevices:
     def begin(self, command):
         plan = self._prepared
         self._prepared = None
-        if self._active is not None or self._stop is not None:
+        if self._active is not None or self._stop is not None or self._test is not None:
             raise RuntimeError("a robot operation is already active")
         if plan is None or plan.command != command:
             raise CollisionRefused("motion plan must be validated before dispatch")
@@ -406,6 +420,9 @@ class HardwareDevices:
     def begin_stop(self, stop_id, now):
         self._prepared = None
         self._active = None      # late results of the old plan are never evaluated
+        if self._test is not None:
+            self._test = None
+            self.test_status = "test flip stopped"
         self.servos.request_stop(f"{stop_id}:servos")
         self.gripper.request_stop(f"{stop_id}:gripper")  # cancels jobs, keeps the vacuum
         self._stop_robot()
@@ -431,7 +448,7 @@ class HardwareDevices:
     # --- teaching ---------------------------------------------------------------------
 
     def capture(self, name):
-        if self._active is not None or not self._robot_stopped():
+        if not self._idle():
             raise TeachError("the robot must stand still to capture a pose")
         self.teach.capture(name, self.r.getActualTCPPose(), self.r.getActualQ(), self.c.getTCPOffset())
         self.reload_teach()
@@ -439,13 +456,52 @@ class HardwareDevices:
 
     def set_freedrive(self, on):
         if on:
-            if self._active is not None or not self._robot_stopped():
+            if not self._idle():
                 raise TeachError("freedrive only with the robot standing still")
             self.c.teachMode()
         else:
             self.c.endTeachMode()
         self.freedrive = on
         return "freedrive on: move the arm by hand" if on else "freedrive off"
+
+    def test_flip(self):
+        """Start the FLIP wrist turn where the arm stands (no teach file needed)."""
+        if self.freedrive:
+            raise TeachError("turn freedrive off first")
+        if self.robot_fault:
+            raise TeachError(self.robot_fault)
+        if not self._idle():
+            raise TeachError("the robot must stand still")
+        offset = self.c.getTCPOffset()
+        if max(abs(offset[0]), abs(offset[1])) > MAX_TCP_XY_OFFSET:
+            raise TeachError("TCP offset has x/y; the wrist-3 flip would move the glass")
+        test = FlipWrist("test flip")
+        try:
+            test.start(self, self.clock())
+        except MotionRefused as exc:
+            self.moving_joints = False
+            raise TeachError(str(exc)) from None
+        self._test = test
+        self.test_status = "test flip running"
+        return "test flip started (STOP cancels it)"
+
+    def _poll_test(self, now):
+        if self._test is None:
+            return
+        if self.robot_fault:
+            self._test = None
+            self.test_status = f"test flip aborted: {self.robot_fault}"
+            return
+        try:
+            detail = self._test.poll(self, now)
+        except (ActionFailed, MotionRefused, RuntimeError) as exc:
+            self._test = None
+            self._stop_robot()
+            self.test_status = f"test flip failed: {exc}"
+            return
+        if detail is not None:
+            self._test = None
+            self.test_status = f"test flip done: {detail}"
 
     def teach_gripper(self, action):
         self.gripper.submit(f"teach-{uuid4().hex}", action)
@@ -468,7 +524,8 @@ class HardwareDevices:
                 "gripper": {k: (v.value if isinstance(v, Grip) else v)
                             for k, v in self.gripper.snapshot().items() if k != "observed_at"},
                 "servos": {k: v for k, v in self.servos.snapshot().items() if k != "observed_at"},
-                "robot_fault": self.robot_fault, "freedrive": self.freedrive}
+                "robot_fault": self.robot_fault, "freedrive": self.freedrive,
+                "test_status": self.test_status}
 
     # --- plans ------------------------------------------------------------------------
 
@@ -583,7 +640,8 @@ def teach_actions(hw, supervisor):
         return run
     return {"teach_capture": guarded(lambda p: hw.capture(p["name"])),
             "teach_freedrive": guarded(lambda p: hw.set_freedrive(p["on"])),
-            "teach_gripper": guarded(lambda p: hw.teach_gripper(p["action"]))}
+            "teach_gripper": guarded(lambda p: hw.teach_gripper(p["action"])),
+            "teach_flip": guarded(lambda p: hw.test_flip())}
 
 
 def connect(slot_ids, vision, teach_path=None):

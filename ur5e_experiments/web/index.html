@@ -27,12 +27,6 @@
       <button id="reset">RESET błędu</button>
     </div>
     <p id="reply" class="muted" aria-live="polite"></p>
-    <details id="token-box">
-      <summary>Token sterowania</summary>
-      <p class="muted">Podgląd działa bez tokenu. START, STOP i RESET wymagają tokenu
-        wypisanego przy uruchomieniu (link <code>#token=…</code>).</p>
-      <input id="token" type="password" autocomplete="off" placeholder="token">
-    </details>
   </section>
 
   <section class="panel" id="progress">
@@ -76,12 +70,16 @@
     <p id="devices" class="muted"></p>
     <div id="teach-tools" hidden>
       <p class="muted">Ustaw ramię (freedrive albo pendant), zatrzymaj je i zapisz pozę.
-        Pozycje stanowisk ucz ze szklanką w chwytaku, otworem w dół.</p>
+        Pozycje stanowisk ucz ze szklanką w chwytaku, otworem w dół.
+        Test obrotu: nadgarstek 3 o 180° w miejscu, bez nauczonych póz; zostaw
+        miejsce na chwytak i szklankę. Ponowne naciśnięcie obraca z powrotem.</p>
+      <p id="test-status" class="muted"></p>
       <div class="buttons">
         <button id="freedrive-on">Freedrive: włącz</button>
         <button id="freedrive-off">Freedrive: wyłącz</button>
         <button id="teach-grip">Chwyć</button>
         <button id="teach-release">Puść</button>
+        <button id="teach-flip">Obróć nadgarstek (test)</button>
       </div>
       <table>
         <thead><tr><th>Poza</th><th>Zapisana</th><th></th></tr></thead>

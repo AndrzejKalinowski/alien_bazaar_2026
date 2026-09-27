@@ -28,12 +28,13 @@ needs server -> browser updates and commands already use HTTP):
     POST /api/teach/capture         {"name": "sprayer.work"}   (--teach only)
     POST /api/teach/freedrive       {"on": true}                (--teach only)
     POST /api/teach/gripper         {"action": "grip"|"release"} (--teach only)
+    POST /api/teach/flip            {}  wrist-3 test flip in place (--teach only)
 
-Access: GET is open (viewing needs no control rights). POST needs the session
-token in the X-Supervisor-Token header, a JSON body and, if the browser sends
-an Origin header, the same origin as the Host. The default bind is loopback;
-binding to the LAN is an explicit option. Plain HTTP: the token is not secret
-from someone who can sniff the network. The listening socket is exclusive, so
+Access: no authentication; anyone who can reach the port can control the
+cell. POST needs a JSON body and, if the browser sends an Origin header, the
+same origin as the Host, so another web page open in the browser cannot send
+commands. The default bind is loopback; binding to the LAN is an explicit
+option and gives every host on it control. The listening socket is exclusive, so
 a second supervisor on the same port fails to start instead of sharing it.
 
 Closing the browser does not stop a batch; reopening it restores the state
@@ -43,13 +44,11 @@ Requires: Python 3.12+ standard library (camera mode: see system_vision.py).
 """
 
 from collections import OrderedDict, deque
-import hmac
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import queue
-import secrets
 import socket
 import threading
 from time import monotonic, sleep
@@ -357,9 +356,8 @@ class PanelServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False   # a second instance must fail, not share the port
 
-    def __init__(self, address, loop, token, frames=None, verbose=False):
+    def __init__(self, address, loop, frames=None, verbose=False):
         self.loop = loop
-        self.token = token
         self.frames = frames
         self.verbose = verbose
         self.streams = threading.BoundedSemaphore(MAX_STREAM_CLIENTS)
@@ -500,9 +498,6 @@ class PanelHandler(BaseHTTPRequestHandler):
     # --- POST ---------------------------------------------------------------------
 
     def _authorize(self):
-        token = self.headers.get("X-Supervisor-Token", "")
-        if not hmac.compare_digest(token.encode(), self.server.token.encode()):
-            raise RequestError(HTTPStatus.FORBIDDEN, "missing or wrong control token")
         origin = self.headers.get("Origin")
         if origin is not None and urlsplit(origin).netloc != self.headers.get("Host", ""):
             raise RequestError(HTTPStatus.FORBIDDEN, "cross-origin request refused")
@@ -581,6 +576,6 @@ class PanelHandler(BaseHTTPRequestHandler):
         return loop.submit(kind, body)
 
 
-def serve(loop, host=DEFAULT_HOST, port=DEFAULT_PORT, token=None, frames=None, verbose=False):
+def serve(loop, host=DEFAULT_HOST, port=DEFAULT_PORT, frames=None, verbose=False):
     """Create the server (binds immediately); call serve_forever() in a thread."""
-    return PanelServer((host, port), loop, token or secrets.token_urlsafe(16), frames, verbose)
+    return PanelServer((host, port), loop, frames, verbose)

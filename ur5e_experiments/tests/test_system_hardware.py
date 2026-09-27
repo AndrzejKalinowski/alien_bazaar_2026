@@ -277,3 +277,59 @@ def test_wipe_strokes_are_taught_in_order():
     assert store.allowed("output.tag-1") and not store.allowed("output.tag-9")
     assert "output.tag-1" in required_poses(["tag-1"], 1)
     assert any("glass.radius" in p for p in store.missing())
+
+
+# --- test flip (teach mode) ---------------------------------------------------------
+
+def untaught():
+    data = teach_data()
+    data["poses"], data["layout"]["stations"] = {}, {}
+    return data
+
+
+def test_test_flip_turns_wrist_3_in_place_without_a_teach_file_and_back(tmp_path):
+    s = System(tmp_path, untaught())
+    actions = teach_actions(s.hw, s.sup)
+    assert s.hw.config_problems and not s.sup.start("s").accepted
+    tcp = s.robot.getActualTCPPose()
+    assert actions["teach_flip"]({}).accepted
+    s.run_until(lambda: "done" in s.hw.test_status, limit=100)
+    assert s.robot.q[5] == pytest.approx(0.5 - pi) and s.robot.q[:5] == Q[:5]
+    assert s.robot.getActualTCPPose() == tcp
+    assert actions["teach_flip"]({}).accepted
+    s.run_until(lambda: s.hw._test is None, limit=100)
+    assert s.robot.q[5] == pytest.approx(0.5)
+
+
+def test_stop_cancels_the_test_flip(tmp_path):
+    s = System(tmp_path, untaught())
+    s.hw.test_flip()
+    assert not s.hw.telemetry(s.clock()).robot_stopped
+    s.sup.request_stop()
+    assert ("stopJ", True) in s.robot.calls and s.hw._test is None
+    assert s.hw.test_status == "test flip stopped"
+
+
+def test_test_flip_is_refused_in_freedrive_with_xy_offset_and_during_a_batch(tmp_path):
+    s = System(tmp_path, untaught())
+    s.hw.set_freedrive(True)
+    with pytest.raises(TeachError, match="freedrive"):
+        s.hw.test_flip()
+    s.hw.set_freedrive(False)
+    s.robot.tcp_offset = [0.02, 0, 0.2, 0, 0, 0]
+    with pytest.raises(TeachError, match="x/y"):
+        s.hw.test_flip()
+    assert not any(call[0] == "moveJ" for call in s.robot.calls)
+    s = System(tmp_path)
+    s.sup.start("s")
+    s.tick()
+    assert not teach_actions(s.hw, s.sup)["teach_flip"]({}).accepted
+
+
+def test_freedrive_and_capture_wait_for_the_test_flip(tmp_path):
+    s = System(tmp_path, untaught())
+    s.hw.test_flip()
+    with pytest.raises(TeachError):
+        s.hw.set_freedrive(True)
+    with pytest.raises(TeachError):
+        s.hw.capture("observe")

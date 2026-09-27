@@ -14,24 +14,6 @@ let status = null;
 let lastStatusAt = 0;
 let cameraStarted = false;
 
-// --- token --------------------------------------------------------------------
-function storedToken() {
-  try { return sessionStorage.getItem("supervisorToken") || ""; } catch { return ""; }
-}
-function storeToken(value) {
-  try { sessionStorage.setItem("supervisorToken", value); } catch { /* private mode */ }
-}
-(function readTokenFromHash() {
-  const match = location.hash.match(/token=([^&]+)/);
-  if (match) {
-    storeToken(decodeURIComponent(match[1]));
-    history.replaceState(null, "", location.pathname);  // keep it out of the address bar
-  }
-  $("token").value = storedToken();
-  $("token").addEventListener("change", (e) => storeToken(e.target.value.trim()));
-  $("token-box").open = !storedToken();
-})();
-
 function requestId() {
   // crypto.randomUUID needs a secure context; plain-HTTP LAN pages do not have one.
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -49,7 +31,7 @@ async function post(path, body, retries = 0) {
     try {
       const response = await fetch(path, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Supervisor-Token": storedToken() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       const data = await response.json();
@@ -176,6 +158,8 @@ function renderHardware(s) {
   $("teach-tools").hidden = !teachEnabled;
   const idle = ["READY", "STOPPED", "FAULT", "COMPLETED"].includes(s.state);
   for (const id of ["freedrive-on", "freedrive-off", "teach-grip", "teach-release"]) $(id).disabled = !idle;
+  $("teach-flip").disabled = !idle || s.freedrive;
+  $("test-status").textContent = s.test_status || "";
   $("poses").replaceChildren(...Object.entries(s.teach.poses).map(([name, captured]) => {
     const button = document.createElement("button");
     button.textContent = "Zapisz tu";
@@ -189,6 +173,7 @@ $("freedrive-on").addEventListener("click", () => command("Freedrive", "/api/tea
 $("freedrive-off").addEventListener("click", () => command("Freedrive", "/api/teach/freedrive", { on: false }));
 $("teach-grip").addEventListener("click", () => command("Chwyt", "/api/teach/gripper", { action: "grip" }));
 $("teach-release").addEventListener("click", () => command("Zwolnienie", "/api/teach/gripper", { action: "release" }));
+$("teach-flip").addEventListener("click", () => command("Test obrotu", "/api/teach/flip", {}));
 
 function renderView(s) {
   const camera = s.camera || { available: false };
