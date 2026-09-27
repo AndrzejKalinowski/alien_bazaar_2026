@@ -559,7 +559,7 @@ def main():
     place_id = None
     tags_in_view = []
     status = "p: pick & place  s: stop  g/r: grip/release  h: home  b: empty table  d: mode  q: quit"
-    watchdog = RobotWatchdog(c)
+    watchdog = RobotWatchdog(c, r)
     try:
         while True:
             if fg.window_closed():
@@ -670,7 +670,7 @@ def main():
                 status = warn(f"error: {e} - stopped, recovering")
                 task = None
                 recover(r, c, watchdog)
-                if cv2.waitKey(1) & 0xFF in (ord("q"), 27):   # keep the window alive, allow quit
+                if cv2.pollKey() & 0xFF in (ord("q"), 27):   # keep the window alive, allow quit
                     break
     except KeyboardInterrupt:
         pass

@@ -37,10 +37,18 @@ How it works:
   5. What is left of each blob after taking out the glasses' outlines is an
      object: an "obstruction" when it touches the image border (the robot
      arm, a hand) or is bigger than OBSTRUCTION_AREA, else "unknown".
+  6. Time limit: the caller's main loop kicks the robot watchdog (200 ms), and
+     a busy mask (reflective table, stale background) took 250-550 ms per
+     frame. So blobs are searched glass-sized first, blobs outside `search`
+     (the detection area) not at all, and none after `deadline`. Blobs that
+     are not searched still become objects with the same labels (so
+     obstructions are always reported), with checked=False when the deadline
+     cut them off.
 
 Requires: pip install opencv-python numpy
 """
 
+import time
 from dataclasses import dataclass
 from itertools import combinations
 
@@ -74,6 +82,7 @@ COVERAGE_TOLERANCE = 0.15    # 1 sigma, fraction of the predicted outline not on
 MAX_FIT_COST = 4.0           # mean squared sigmas per fit term, worse is not a glass
 MIN_ORIENTATION_MARGIN = 4.0  # chi2 (summed squared sigmas) the other orientation must be worse by, else "?"
 OUTLINE_POINTS = 48          # points per end circle of the predicted outline
+CLASSIFY_BUDGET = 0.06       # s per frame, change mask + glass search (find_glasses sets the deadline)
 
 # --- objects --------------------------------------------------------------------
 
@@ -118,6 +127,7 @@ class TableObject:
     xy: tuple             # m, table point under the contour's centre
     area: float           # m^2 on the table
     table_contour: np.ndarray = None   # (N, 2) m, the contour on the table plane
+    checked: bool = True  # False: not (fully) searched for glasses, the time budget ran out
 
 
 class TableCamera:
@@ -344,14 +354,23 @@ def classify_candidate(cam, shape, blob, circles):
     return FoundGlass(xy, orientation, float(margin), cost, float(top_diameter), top, shape_outline)
 
 
-def classify_blob(cam, shape, blob, circles):
-    """Glasses in one blob: pairs first (best fit first), then single circles."""
+def past(deadline):
+    return deadline is not None and time.perf_counter() > deadline
+
+
+def classify_blob(cam, shape, blob, circles, deadline=None):
+    """Glasses in one blob: pairs first (best fit first), then single circles.
+    Past the deadline no more candidates are tried (up to 78 fits for MAX_CIRCLES)."""
     candidates = []
     for pair in combinations(circles, 2):
+        if past(deadline):
+            break
         g = classify_candidate(cam, shape, blob, list(pair))
         if g is not None:
             candidates.append((0, g.cost, pair, g))
     for c in circles:
+        if past(deadline):
+            break
         g = classify_candidate(cam, shape, blob, [c])
         if g is not None:
             candidates.append((1, g.cost, (c,), g))
@@ -373,7 +392,7 @@ def classify_blob(cam, shape, blob, circles):
     return glasses
 
 
-def leftover_objects(cam, blob, glasses, min_object_area=MIN_OBJECT_AREA):
+def leftover_objects(cam, blob, glasses, min_object_area=MIN_OBJECT_AREA, checked=True):
     """What of the blob the glasses don't explain, as TableObjects."""
     rest = blob.mask.copy()
     for g in glasses:
@@ -397,29 +416,44 @@ def leftover_objects(cam, blob, glasses, min_object_area=MIN_OBJECT_AREA):
         big = area > OBSTRUCTION_AREA or blob.touches_border
         objects.append(TableObject("obstruction" if big else "unknown", contour,
                                    (float(xy[0]), float(xy[1])), float(area),
-                                   cam.to_plane(contour, cam.table_z)[:, :2]))
+                                   cam.to_plane(contour, cam.table_z)[:, :2], checked))
     return objects
 
 
-def classify(undistorted, mask, cam, shape, edge_threshold, roundness):
-    """(glasses, objects) on the table, from an undistorted BGR frame and its change mask."""
+def classify(undistorted, mask, cam, shape, edge_threshold, roundness, search=None, deadline=None):
+    """(glasses, objects) on the table, from an undistorted BGR frame and its change mask.
+
+    search: uint8 mask, glasses are only searched in blobs that overlap it (None =
+    everywhere); deadline: time.perf_counter() after which no blob is searched.
+    """
     gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
     image_size = (mask.shape[1], mask.shape[0])
     radii = radius_range(cam, shape)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    # Glass-sized blobs first: when the deadline cuts in, it hits the big ones
+    # (arm, cables, reflections), which also cost the most Hough time
+    glass_area = np.pi * radii[1] ** 2
+    order = sorted(range(1, count),
+                   key=lambda i: abs(np.log(max(stats[i, cv2.CC_STAT_AREA], 1) / glass_area)))
     glasses, objects = [], []
-    for index in range(1, count):
+    for index in order:
         blob = Blob(labels, index, stats[index], image_size)
+        if search is not None and not np.any(search[blob.y0:blob.y1, blob.x0:blob.x1][blob.mask > 0]):
+            objects += leftover_objects(cam, blob, [])
+            continue
+        if past(deadline):
+            objects += leftover_objects(cam, blob, [], checked=False)
+            continue
         circles = find_circles(gray, blob, radii, edge_threshold, roundness)
-        found = classify_blob(cam, shape, blob, circles)
-        if not found and not blob.touches_border:
+        found = classify_blob(cam, shape, blob, circles, deadline)
+        if not found and not blob.touches_border and not past(deadline):
             # Hough found nothing usable: try the blob's enclosing circle as one end
             contours, _ = cv2.findContours(blob.mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             (u, v), r = cv2.minEnclosingCircle(max(contours, key=cv2.contourArea))
             if radii[0] <= r <= radii[1]:
-                found = classify_blob(cam, shape, blob, [(u + blob.x0, v + blob.y0, r)])
+                found = classify_blob(cam, shape, blob, [(u + blob.x0, v + blob.y0, r)], deadline)
         glasses += found
-        objects += leftover_objects(cam, blob, found)
+        objects += leftover_objects(cam, blob, found, checked=not past(deadline))
     return glasses, objects
 
 

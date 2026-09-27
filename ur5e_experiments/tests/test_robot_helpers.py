@@ -12,9 +12,10 @@ MIN_Z, MAX_Z = -0.05, 0.60
 # --- robot_watchdog -------------------------------------------------------------
 
 class FakeControl:
+    """RTDEControlInterface; the safety state is only on FakeReceive, as in ur_rtde."""
+
     def __init__(self):
         self.running = True
-        self.protective_stop = False
         self.calls = []
 
     def setWatchdog(self, frequency):
@@ -23,16 +24,10 @@ class FakeControl:
 
     def kickWatchdog(self):
         self.calls.append("kick")
-        return self.running and not self.protective_stop
+        return self.running
 
     def isProgramRunning(self):
         return self.running
-
-    def isProtectiveStopped(self):
-        return self.protective_stop
-
-    def isEmergencyStopped(self):
-        return False
 
     def reuploadScript(self):
         self.calls.append("reupload")
@@ -40,16 +35,39 @@ class FakeControl:
         return True
 
 
+class FakeReceive:
+    def __init__(self):
+        self.protective_stop = False
+
+    def isProtectiveStopped(self):
+        return self.protective_stop
+
+    def isEmergencyStopped(self):
+        return False
+
+
+def test_fakes_match_ur_rtde():
+    rtde_control = pytest.importorskip("rtde_control")
+    rtde_receive = pytest.importorskip("rtde_receive")
+    if not isinstance(rtde_control.RTDEControlInterface, type):
+        pytest.skip("ur_rtde is stubbed")
+    for fake, real in ((FakeControl, rtde_control.RTDEControlInterface),
+                       (FakeReceive, rtde_receive.RTDEReceiveInterface)):
+        for name in vars(fake):
+            if not name.startswith("_"):
+                assert hasattr(real, name), f"{real.__name__} has no {name}"
+
+
 def test_watchdog_arms_and_kicks():
     c = FakeControl()
-    watchdog = RobotWatchdog(c)
+    watchdog = RobotWatchdog(c, FakeReceive())
     assert c.calls == [("set", 5.0)]
     assert watchdog.kick() is True
 
 
 def test_watchdog_trip_reuploads_and_rearms():
     c = FakeControl()
-    watchdog = RobotWatchdog(c)
+    watchdog = RobotWatchdog(c, FakeReceive())
     c.running = False
     assert watchdog.kick() is False
     assert c.calls[-2:] == ["reupload", ("set", 5.0)]
@@ -57,16 +75,27 @@ def test_watchdog_trip_reuploads_and_rearms():
 
 
 def test_watchdog_waits_for_protective_stop_to_clear():
-    c = FakeControl()
-    watchdog = RobotWatchdog(c)
-    c.running, c.protective_stop = False, True
+    c, r = FakeControl(), FakeReceive()
+    watchdog = RobotWatchdog(c, r)
+    c.running, r.protective_stop = False, True
     before = len(c.calls)
     assert watchdog.kick() is False
     assert watchdog.kick() is False
     assert "reupload" not in c.calls[before:]
-    c.protective_stop = False
+    r.protective_stop = False
     assert watchdog.kick() is False            # re-uploads now
     assert watchdog.kick() is True
+
+
+def test_watchdog_reports_slow_kicks(capsys):
+    now = [0.0]
+    watchdog = RobotWatchdog(FakeControl(), FakeReceive(), clock=lambda: now[0])
+    now[0] = 0.05
+    watchdog.kick()
+    assert "WARNING" not in capsys.readouterr().out
+    now[0] = 0.30
+    watchdog.kick()
+    assert "250 ms since the last watchdog kick" in capsys.readouterr().out
 
 
 # --- gamepad_jog ---------------------------------------------------------------

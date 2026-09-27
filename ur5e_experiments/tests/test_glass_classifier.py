@@ -29,10 +29,10 @@ def background(empty):
     return tb.TableBackground.capture(st.frames(empty), st.SIZE, st.T_BASE_CAM, frames=10)
 
 
-def classify(background, scene, gain=1.0):
+def classify(background, scene, gain=1.0, **kwargs):
     frame = st.photo(scene, gain=gain, seed=3)
     change = background.compare(frame, adapt=False)
-    return gc.classify(frame, change.mask, CAM, SHAPE, EDGE, ROUNDNESS)
+    return gc.classify(frame, change.mask, CAM, SHAPE, EDGE, ROUNDNESS, **kwargs)
 
 
 def match(glasses, xy):
@@ -157,3 +157,33 @@ def test_arm_is_an_obstruction_and_blocks_the_glass_next_to_it(background, empty
     reach = st.MOUTH / 2 + 0.03   # axis to wall, plus a 3 cm gap
     assert gc.near(np.array(far), objects, reach) == []
     assert gc.near(np.array(near_arm), objects, reach) != []
+
+
+def test_past_the_deadline_blobs_are_objects_with_the_same_labels(background, empty):
+    # Out of time the glasses are missed, but the arm must still be an obstruction
+    scene = empty.copy()
+    st.draw_glass(scene, (0.2, 0.0), gc.DOWN)
+    st.arm(scene)
+    glasses, objects = classify(background, scene, deadline=0.0)
+    assert glasses == []
+    assert "obstruction" in [o.label for o in objects]
+    assert not any(o.checked for o in objects)
+
+
+def test_glass_sized_blobs_are_searched_first(background, empty, monkeypatch):
+    scene = empty.copy()
+    st.draw_glass(scene, (0.2, 0.0), gc.DOWN)
+    st.arm(scene)
+    searched = []
+    find = gc.find_circles
+    monkeypatch.setattr(gc, "find_circles", lambda gray, blob, *a: searched.append(blob) or find(gray, blob, *a))
+    classify(background, scene)
+    assert not searched[0].touches_border and searched[-1].touches_border
+
+
+def test_blobs_outside_the_search_region_are_not_searched(background, empty):
+    scene = empty.copy()
+    st.draw_glass(scene, (0.2, 0.0), gc.DOWN)
+    glasses, objects = classify(background, scene, search=np.zeros((st.SIZE[1], st.SIZE[0]), np.uint8))
+    assert glasses == []
+    assert [o.checked for o in objects] == [True]   # the glass blob, as an object

@@ -613,7 +613,7 @@ def main():
     status = "ready"
     stamp = 0.0
 
-    watchdog = RobotWatchdog(c)
+    watchdog = RobotWatchdog(c, r)
     try:
         while True:
             frame, stamp = camera.read(newer_than=stamp)
@@ -639,7 +639,7 @@ def main():
             chosen = detector.choose(tags, frame.shape)
 
             keys = gamepad.poll_keys()
-            key = cv2.waitKey(1) & 0xFF
+            key = cv2.pollKey() & 0xFF   # not waitKey(1): stalls ~480 ms (find_glasses.read_keys)
             if key != 0xFF:
                 keys.append(chr(key))
             if "q" in keys or "\x1b" in keys:

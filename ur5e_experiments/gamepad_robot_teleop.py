@@ -85,7 +85,7 @@ def main():
 
     r, c = connect_rtde()
     jogger = Jogger(c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
-    watchdog = RobotWatchdog(c)
+    watchdog = RobotWatchdog(c, r)
     home_started = None   # time the home move started, None = not homing
 
     try:
@@ -131,7 +131,7 @@ def main():
                 sleep(ERROR_RETRY_DELAY)
                 r, c = recover_from_fault(r, c)
                 jogger = Jogger(c, gamepad, MIN_TCP_Z, MAX_TCP_Z)
-                watchdog = RobotWatchdog(c)   # the re-uploaded script has no watchdog
+                watchdog = RobotWatchdog(c, r)   # the re-uploaded script has no watchdog
                 home_started = None
     except (KeyboardInterrupt, SystemExit):
         try:

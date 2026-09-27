@@ -1,6 +1,7 @@
 {
- "edge": 92,
- "roundness %": 80,
- "max saturation": 160,
- "min brightness": 89
+ "edge": 128,
+ "roundness %": 75,
+ "max saturation": 198,
+ "min brightness": 121,
+ "diff": 3
 }

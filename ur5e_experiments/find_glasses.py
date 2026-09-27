@@ -121,6 +121,13 @@ Diff mode (table_background.py, glass_classifier.py):
   stops adapting to the light. When most of the area changed, or the
   exposure is way off, the background is STALE (red text) and nothing is
   reported: clear the table and press b again.
+  The diff detection gets gc.CLASSIFY_BUDGET (60 ms) per frame and only looks
+  at changes that reach into the detection area (+ one glass diameter), so
+  the robot watchdog keeps being kicked however busy the mask is (a
+  reflective sheet on the table took 250-550 ms). Changes it had no time
+  for are still reported as objects, and the status line says "N changes
+  not searched": glasses in them are missed that frame. Recapture the
+  background (b) and keep glare off the table to get rid of it.
   Without a background the classic mode below runs as before.
 
 For use from other scripts:
@@ -233,7 +240,9 @@ def warn(message):
 def read_keys(gamepad):
     """Keys pressed since the last call, from the gamepad and the OpenCV window."""
     keys = gamepad.poll_keys() if gamepad else []
-    key = cv2.waitKey(1) & 0xFF
+    # pollKey, not waitKey(1): on this laptop waitKey(1) blocked ~480 ms every
+    # 1-2 s (Win32 HighGUI waits for its timer message), past the robot watchdog
+    key = cv2.pollKey() & 0xFF
     if key != 0xFF:
         keys.append(chr(key))
     return keys
@@ -383,6 +392,8 @@ class GlassFinder:
         self.mode = DIFF if self.background else CLASSIC
         self.change = None       # table_background.Change of the last detect() in diff mode
         self.objects = []        # glass_classifier.TableObject of the last detect() in the area
+        self.unsearched = 0      # objects in the area the last detect() had no time to search for glasses
+        self._search = (None, None)   # (key, mask) cache of the glass search region
         self.show_mask = False   # draw the change mask (v)
         self._adapt = True       # background may follow the frame (not while an obstruction is seen)
         print(f"Detection mode: {self.mode}"
@@ -420,6 +431,7 @@ class GlassFinder:
             return self._detect_diff(undistorted)
         self.change = None
         self.objects = []
+        self.unsearched = 0
         gray = cv2.cvtColor(undistorted, cv2.COLOR_BGR2GRAY)
         gray = cv2.medianBlur(gray, BLUR)
         circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT_ALT, dp=1.5,
@@ -462,13 +474,17 @@ class GlassFinder:
         """Glasses (with orientation) where the table differs from the empty one."""
         self.background.threshold = self.diff_threshold
         area_pixels = self.area_pixels() if self.area is not None else None
+        deadline = time.perf_counter() + gc.CLASSIFY_BUDGET
         self.change = self.background.compare(undistorted, area_pixels, adapt=self._adapt)
         if self.change.stale:
             self.objects = []
+            self.unsearched = 0
             return []
         found, objects = gc.classify(undistorted, self.change.mask, self.cam, self.shape,
-                                     self.edge_threshold, self.roundness)
+                                     self.edge_threshold, self.roundness,
+                                     search=self._search_mask(self.change.mask.shape), deadline=deadline)
         self.objects = [o for o in objects if self._object_in_area(o)]
+        self.unsearched = sum(not o.checked for o in self.objects)
         # Nothing big may slowly become background (the robot parked in view)
         self._adapt = not any(o.label == "obstruction" for o in objects)
         hsv = cv2.cvtColor(undistorted, cv2.COLOR_BGR2HSV)
@@ -481,6 +497,22 @@ class GlassFinder:
                                  g.top_pixel, saturation, brightness, g.orientation, g.margin,
                                  g.outline))
         return glasses
+
+    def _search_mask(self, shape):
+        """Where glasses are searched for: the detection area widened by one glass
+        diameter (the whole blob of a glass standing on the edge must count), None =
+        everywhere. Blobs outside it cost Hough time and are dropped anyway."""
+        if self.area is None:
+            return None
+        key = (self.area.tobytes(), shape)
+        if self._search[0] != key:
+            area = np.full(shape, 255, np.uint8)
+            cv2.fillPoly(area, [self.area_pixels()], 0)
+            # Distance transform, not dilate: a 225 px dilate took 340 ms (watchdog), this 14 ms
+            margin = 2 * gc.radius_range(self.cam, self.shape)[1]
+            mask = np.where(cv2.distanceTransform(area, cv2.DIST_L2, 5) <= margin, 255, 0).astype(np.uint8)
+            self._search = (key, mask)
+        return self._search[1]
 
     def _object_in_area(self, obj):
         if self.area is None:
@@ -505,7 +537,8 @@ class GlassFinder:
         if self.change is not None and self.change.stale:
             return (f"diff: BACKGROUND STALE ({self.change.changed_fraction:.0%} changed, "
                     f"gain {self.change.gain:.2f}), clear the table and press b")
-        return "diff" + (f", gain {self.change.gain:.2f}" if self.change else "")
+        busy = f", {self.unsearched} changes not searched (too busy: b, glare)" if self.unsearched else ""
+        return "diff" + (f", gain {self.change.gain:.2f}" if self.change else "") + busy
 
     def in_area(self, xy):
         if self.area is None:
@@ -1024,7 +1057,7 @@ def calibrate(args):
     points, pending = load_progress(width, height, args.fresh)
     freedrive = False
     status = "Robot out of view, SPACE / A: measure tags"
-    watchdog = RobotWatchdog(rtde_c)
+    watchdog = RobotWatchdog(rtde_c, rtde_r)
     try:
         while True:
             image = undistort(read_frame(cap))
@@ -1133,7 +1166,7 @@ def run(args):
     setup_window(editor)
     status = ("p: measure  " + ("m: move above glass  s: stop  t: tip as corner  " if args.robot else "")
               + "b: empty table  d: mode  v: mask  area: drag / u / x   q: quit")
-    watchdog = RobotWatchdog(rtde_c) if rtde_c else None
+    watchdog = RobotWatchdog(rtde_c, rtde_r) if rtde_c else None
     try:
         while True:
             if window_closed():

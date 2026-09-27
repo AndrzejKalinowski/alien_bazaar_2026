@@ -83,6 +83,17 @@ def test_detection_area_filters_glasses(finder):
     assert [g.orientation for g in glasses] == [gc.UP]
 
 
+def test_out_of_time_reports_unsearched_changes(finder, monkeypatch):
+    empty = st.mat()
+    fg.diff_key(finder, "b", FakeCamera(empty))
+    scene = empty.copy()
+    st.draw_glass(scene, (0.2, 0.25), gc.DOWN)
+    monkeypatch.setattr(gc, "CLASSIFY_BUDGET", -1.0)
+    assert finder.detect(st.photo(scene, seed=3)) == []
+    assert finder.unsearched == 1
+    assert "1 changes not searched" in finder.background_status()
+
+
 def test_stale_background_finds_nothing(finder):
     fg.diff_key(finder, "b", FakeCamera(st.mat()))
     assert finder.detect(st.photo(st.mat(seed=9), seed=3)) == []
