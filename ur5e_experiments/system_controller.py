@@ -121,6 +121,10 @@ class Supervisor:
             try:
                 now = self.clock()
                 self._idle(self._telemetry(now))
+                # Optional adapter hook: conditions that block START but not RESET.
+                problems = getattr(self.devices, "start_problems", lambda: [])()
+                if problems:
+                    raise ValueError("not ready: " + "; ".join(problems))
                 scene = self._scene(now)
                 if not scene.targets:
                     raise ValueError("no glasses detected")

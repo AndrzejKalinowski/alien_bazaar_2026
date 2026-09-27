@@ -84,6 +84,7 @@ class Scene:
     sequence: int
     observed_at: float
     targets: tuple[GlassTarget, ...]
+    window_start: float | None = None   # first frame of a camera measurement window
 
 
 @dataclass(frozen=True)

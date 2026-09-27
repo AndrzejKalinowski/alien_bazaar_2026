@@ -62,4 +62,7 @@ class DeviceAdapter(Protocol):
 
     def begin_stop(self, stop_id: str, now: float) -> None: ...
 
+    # Optional: start_problems() -> list[str]; non-empty refuses START only
+    # (missing configuration, arm not at the observe pose), never RESET.
+
     def poll_stop(self, stop_id: str, now: float) -> Result | None: ...

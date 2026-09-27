@@ -25,8 +25,9 @@ Glasses are assumed upright (the classic detector cannot tell orientation).
 Only the detection area (detection_area.json, edited in find_glasses.py)
 counts; it must exclude the stations and the output tags. Camera index,
 resolution and calibration files are the constants of find_glasses.py.
-A future hardware OBSERVE must wait for a window that started after the arm
-left the camera view; the simulated robot never occludes the real table.
+window_start is the first frame of the window: the hardware OBSERVE step
+waits for a Scene whose window started after the arm reached the observe
+pose, so no frame of it can show the arm over the table.
 Requires: Python standard library for the tracker; CameraVision needs
 opencv-python, numpy and the overhead calibration (see find_glasses.py).
 """
@@ -72,7 +73,7 @@ class WindowAccumulator:
         self._frames = []
 
     def add(self, points, timestamp):
-        """Add one frame; returns (stable points, last timestamp) when a window closes."""
+        """Add one frame; returns (stable points, last, first timestamp) when a window closes."""
         for x, y, _ in points:
             _finite(x, y)
         if self._start is None:
@@ -82,7 +83,7 @@ class WindowAccumulator:
             return None
         frames, self._frames, self._start = self._frames, [], None
         if len(frames) < self.min_frames:
-            return [], frames[-1][0]
+            return [], frames[-1][0], frames[0][0]
         clusters = []   # [reference (x, y), {frame index}, [points]]
         for index, (_, detections) in enumerate(frames):
             for p in detections:
@@ -96,7 +97,7 @@ class WindowAccumulator:
         need = ceil(len(frames) * self.fraction)
         stable = [(median(p[0] for p in c[2]), median(p[1] for p in c[2]), c[2][-1][2])
                   for c in clusters if len(c[1]) >= need]
-        return stable, frames[-1][0]
+        return stable, frames[-1][0], frames[0][0]
 
 
 class TargetTracker:
@@ -204,13 +205,13 @@ class CameraVision:
             # No new Scenes: the supervisor sees a stale camera and stops the batch.
             self.error = f"camera stopped: {exc}"
 
-    def _publish(self, stable, observed_at):
+    def _publish(self, stable, observed_at, window_start):
         ids = self._tracker.update([(x, y) for x, y, _ in stable])
         targets = tuple(GlassTarget(tid, float(x), float(y))
                         for tid, (x, y, _) in zip(ids, stable) if tid is not None)
         with self._lock:
             self._sequence += 1
-            self._scene = Scene(self._sequence, observed_at, targets)
+            self._scene = Scene(self._sequence, observed_at, targets, window_start)
             self._labels = [(pixel, tid) for tid, (_, _, pixel) in zip(ids, stable) if tid is not None]
 
     def _preview(self, image, glasses, now):

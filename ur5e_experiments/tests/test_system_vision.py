@@ -22,14 +22,14 @@ def test_window_publishes_medians_of_glasses_seen_often_enough():
     frames = [[(0.100 + 0.001 * (i % 3), 0.2), (0.4, 0.4)] if i % 2 else [(0.101, 0.2)]
               for i in range(7)]
     frames[3].append((0.7, 0.7))  # one-frame reflection
-    (stable, observed_at), = feed(window, frames)
-    assert observed_at == pytest.approx(0.3)
+    (stable, observed_at, window_start), = feed(window, frames)
+    assert observed_at == pytest.approx(0.3) and window_start == 0.0
     assert [(round(x, 3), y) for x, y, _ in stable] == [(0.101, 0.2)]  # 0.4 seen in 3/7
 
 
 def test_too_few_frames_in_a_window_publish_nothing():
     window = WindowAccumulator(period=0.3, min_frames=5)
-    (stable, _), = feed(window, [[(0.1, 0.2)]] * 3, dt=0.15)
+    (stable, _, _), = feed(window, [[(0.1, 0.2)]] * 3, dt=0.15)
     assert stable == []
 
 

@@ -66,13 +66,15 @@ class FakeVision:
         self.targets = tuple(targets)
         self.sequence = 0
 
+        self.lag = 0.01      # s, window start before "now"; huge = never fresh
+
     def observe(self, now):
         self.sequence += 1
-        return Scene(self.sequence, now, self.targets)
+        return Scene(self.sequence, now, self.targets, now - self.lag)
 
 
 class System:
-    def __init__(self, tmp_path, data=None, holds=True, force=True):
+    def __init__(self, tmp_path, data=None, holds=True, force=True, arm_model=False):
         path = tmp_path / "teach.json"
         path.write_text(json.dumps(data or teach_data()), encoding="utf-8")
         self.clock = SimulationClock()
@@ -84,7 +86,8 @@ class System:
         self.store = TeachStore(["tag-1"], str(path))
         self.hw = HardwareDevices(self.robot, SafeControl(self.robot, self.robot), self.gripper, self.servos,
                                   self.store, FakeVision([GlassTarget("g1", *GLASS)]), -0.05, MAX_TCP_Z,
-                                  clock=self.clock, watchdog_factory=RobotWatchdog)
+                                  clock=self.clock, watchdog_factory=RobotWatchdog,
+                                  arm_model=arm_model)  # the fake robot has no kinematics
         self.hw.arm()
         self.sup = Supervisor(self.hw, [OutputSlot("tag-1", SlotState.FREE)], self.clock)
 
@@ -277,3 +280,88 @@ def test_wipe_strokes_are_taught_in_order():
     assert store.allowed("output.tag-1") and not store.allowed("output.tag-9")
     assert "output.tag-1" in required_poses(["tag-1"], 1)
     assert any("glass.radius" in p for p in store.missing())
+
+
+def test_observe_waits_for_a_camera_window_started_after_arrival(tmp_path):
+    s = System(tmp_path)
+    s.hw.vision.lag = 1000.0   # every window began before the arm arrived
+    s.sup.start("s")
+    s.run_until(lambda: s.sup.state == State.FAULT)
+    assert "OBSERVE timed out" in s.sup.fault
+    assert s.sup.outputs.slots["tag-1"].state == SlotState.OCCUPIED  # glass was placed before
+
+
+def test_start_needs_the_arm_at_the_observe_pose(tmp_path):
+    s = System(tmp_path)
+    s.robot.pose[0] += 0.2
+    reply = s.sup.start("s")
+    assert not reply.accepted and "observe pose" in reply.message
+
+
+def test_missing_configuration_blocks_start_but_not_reset(tmp_path):
+    data = teach_data()
+    del data["poses"]["flip"]
+    s = System(tmp_path, data)
+    assert not s.sup.start("s").accepted
+    s.sup.request_stop("check")
+    s.run_until(lambda: s.sup.state != State.STOPPING)
+    assert s.sup.reset_fault().accepted
+
+
+class FakePad:
+    def __init__(self):
+        self.speed = None
+        self.closed = False
+
+    def jog_speed(self):
+        return None if self.speed is None else list(self.speed)
+
+    def close(self):
+        self.closed = True
+
+
+def test_gamepad_stops_a_batch_and_jogs_only_when_idle(tmp_path):
+    from system_hardware import GamepadOverride
+    s = System(tmp_path)
+    pad, stops = FakePad(), []
+    override = GamepadOverride(s.hw, pad, lambda: s.sup.state, stops.append)
+    pad.speed = [0.05, 0, 0, 0, 0, 0]
+    override.update(0.0)
+    assert ("speedL", [0.05, 0, 0, 0, 0, 0]) in s.robot.calls and not stops
+    pad.speed = None
+    override.update(0.0)
+    assert s.robot.calls[-1] == ("speedStop",)
+    s.robot.velocity[:] = 0
+    s.sup.start("s")
+    s.tick()
+    pad.speed = [0.05, 0, 0, 0, 0, 0]
+    calls = len(s.robot.calls)
+    override.update(0.0)
+    override.update(0.0)
+    assert stops == ["gamepad override"]
+    assert not any(c[0] == "speedL" for c in s.robot.calls[calls:])
+
+
+def test_arm_model_refuses_an_unreachable_plan_before_motion(tmp_path):
+    from system_arm import pose_matrix as matrix, rotvec, tcp_matrix
+    from system_model import Command
+    q0 = np.array([0.3, -1.9, 1.8, -1.47, -1.57, 0.2])
+    s = System(tmp_path, arm_model=True)
+    T = tcp_matrix(q0, matrix(s.robot.tcp_offset))
+    s.robot.q, s.robot.pose = list(q0), [*T[:3, 3], *rotvec(T[:3, :3])]
+    s.store.data["poses"]["observe"]["pose"] = [1.4, -0.5, 0.35, *SIDE]   # beyond the UR5e reach
+    command = Command("c", "b", GlassTarget("g1", *GLASS), "tag-1", Step.OBSERVE, 0.0)
+    with pytest.raises(ValueError, match="not reachable"):
+        s.hw.validate_motion(command)
+    assert not s.robot.calls
+
+
+def test_arm_model_disagreeing_with_the_robot_blocks_start(tmp_path):
+    from system_arm import pose_matrix as matrix, rotvec, tcp_matrix
+    q0 = np.array([0.3, -1.9, 1.8, -1.47, -1.57, 0.2])
+    s = System(tmp_path, arm_model=True)
+    T = tcp_matrix(q0, matrix(s.robot.tcp_offset))
+    s.robot.q, s.robot.pose = list(q0), [*T[:3, 3], *rotvec(T[:3, :3])]
+    assert not any("arm model" in p for p in s.hw.start_problems())
+    s.robot.pose[2] += 0.01   # the robot reports another TCP than the model predicts
+    assert any("arm model" in p for p in s.hw.start_problems())

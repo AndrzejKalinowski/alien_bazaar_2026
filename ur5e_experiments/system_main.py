@@ -23,9 +23,14 @@ Exactly one of --simulate / --hardware is required; nothing connects by default.
 through SafeControl, the gripper and the servo bus, and needs --web. The arm
 can move once it has started. It needs --camera for batches; --teach adds
 freedrive, manual grip/release and pose capture to the panel (outside
-batches), to fill system_teach.json. Output places start UNKNOWN: confirm
-them empty in the panel. START stays refused while the teach file or layout
-is incomplete, the TCP offset changed, or freedrive is on.
+batches), to fill system_teach.json. --gamepad: any stick input STOPs a
+batch; when idle the sticks jog the arm (gamepad_jog.py). Output occupancy
+persists in system_outputs.json: a restart never frees a place, and after an
+unclean exit every free place comes back UNKNOWN (confirm it in the panel).
+START stays refused while the teach file or layout is incomplete, the TCP
+offset changed, freedrive is on or the arm is not at the observe pose.
+One --hardware process at a time (supervisor.lock). Events always go to
+logs/supervisor-<date>.jsonl unless --journal names another new file.
 --fast advances a virtual monotonic clock.
 Without it the same fake sequence runs in wall time; Ctrl+C requests STOP.
 --auto-clear-output simulates an operator emptying the output between glasses.
@@ -44,13 +49,15 @@ Requires: Python 3.12+ standard library only (--camera: OpenCV;
 
 import argparse
 from contextlib import ExitStack
+from datetime import datetime
 import json
+import os
 from pathlib import Path
 import sys
 import threading
 from time import monotonic, sleep
 
-from system_batch import OutputSlot
+from system_batch import OutputSlot, OutputStore
 from system_controller import Supervisor
 from system_model import GlassTarget, Reply, SlotState, State, Step
 from system_settings import SIM_OPERATION_TIME, STOP_TIMEOUT, TICK_PERIOD
@@ -79,14 +86,49 @@ def port_number(value):
     return value
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOCK_FILE = os.path.join(HERE, "supervisor.lock")
+LOG_DIR = os.path.join(HERE, "logs")
+
+
 def open_journal(stack, path):
     return stack.enter_context(path.open("x", encoding="utf-8")) if path else None
 
 
+def instance_lock(path=None):
+    """Held for the process lifetime; the OS drops it if the process dies."""
+    path = path or LOCK_FILE
+    handle = open(path, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise RuntimeError(f"another hardware supervisor is running ({path} is locked)") from None
+    return handle
+
+
+def default_journal():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    return Path(LOG_DIR) / f"supervisor-{datetime.now():%Y%m%d-%H%M%S}.jsonl"
+
+
 def run_web(args, targets, slots):
-    frames = vision = None
+    frames = vision = store = None
     try:
         with ExitStack() as stack:
+            if args.hardware:
+                stack.callback(instance_lock().close)
+                store = OutputStore()
+                slots = store.load_slots([slot.id for slot in slots])
+                if store.warning:
+                    print(f"WARNING: {store.warning}", file=sys.stderr, flush=True)
+                args.journal = args.journal or default_journal()
             journal = open_journal(stack, args.journal)
             if args.camera:
                 from system_vision import CameraVision  # OpenCV only in camera mode
@@ -101,15 +143,28 @@ def run_web(args, targets, slots):
                 if events:
                     journal.flush()
 
-            sinks = [write_events] if journal else ()
+            sinks = [write_events] if journal else []
             if args.hardware:
                 import system_hardware  # ur_rtde, numpy, pyserial only in this mode
                 devices = system_hardware.connect([slot.id for slot in slots], vision)
                 stack.callback(devices.close)
                 supervisor = Supervisor(devices, slots)
+                override = None
+
+                def service(now):
+                    devices.service(now)
+                    if override is not None:
+                        override.update(now)
+
                 loop = system_web.ControlLoop(
-                    supervisor, sinks=sinks, service=devices.service, extra_status=devices.panel_status,
+                    supervisor, sinks=[*sinks, store.sink(supervisor)], service=service,
+                    extra_status=devices.panel_status,
                     actions=system_hardware.teach_actions(devices, supervisor) if args.teach else {})
+                if args.gamepad:
+                    from gamepad_jog import GamepadControl
+                    override = system_hardware.GamepadOverride(
+                        devices, GamepadControl(), lambda: supervisor.state, loop.stop)
+                    stack.callback(override.close)
             else:
                 devices = SimulatedDevices([] if args.camera else targets, operation_time=args.step_time,
                                            fail_at=Step(args.fail_at) if args.fail_at else None,
@@ -143,6 +198,9 @@ def run_web(args, targets, slots):
                 loop.shutdown()
                 owner.join()
                 server.shutdown()
+                if store is not None:
+                    store.close(supervisor, stopped=not loop.error and supervisor.state not in (
+                        State.RUNNING, State.WAITING_OUTPUT, State.STOPPING))
             print(json.dumps(loop.status(), ensure_ascii=True))
             if loop.error or supervisor.state == State.FAULT:
                 print(loop.error or supervisor.fault, file=sys.stderr)
@@ -176,6 +234,7 @@ def main(argv=None):
     web.add_argument("--step-time", type=step_time, default=SIM_OPERATION_TIME,
                      help="s per simulated operation")
     web.add_argument("--teach", action="store_true", help="hardware: freedrive and pose capture in the panel")
+    web.add_argument("--gamepad", action="store_true", help="hardware: sticks STOP a batch, jog when idle")
     args = parser.parse_args(argv)
     if args.hardware:
         if not args.web:
@@ -184,8 +243,8 @@ def main(argv=None):
             parser.error("--hardware needs --camera for batches (or --teach to teach poses)")
         if args.fail_at or args.step_time != SIM_OPERATION_TIME:
             parser.error("--fail-at and --step-time are simulation options")
-    elif args.teach:
-        parser.error("--teach needs --hardware")
+    elif args.teach or args.gamepad:
+        parser.error("--teach and --gamepad need --hardware")
     if args.web:
         if args.fast or args.stop_at or args.auto_clear_output:
             parser.error("--fast, --stop-at and --auto-clear-output are CLI-only; use the panel")
@@ -196,7 +255,7 @@ def main(argv=None):
 
     clock = SimulationClock() if args.fast else monotonic
     targets = [GlassTarget(f"glass-{i + 1}", 0.1 + i * 0.1, -0.4) for i in range(args.glasses)]
-    # Real output places are unknown until the operator confirms them empty.
+    # Hardware: replaced by the persisted occupancy (OutputStore) in run_web.
     slots = [OutputSlot(f"tag-{i + 1}", SlotState.UNKNOWN if args.hardware else SlotState.FREE)
              for i in range(args.slots)]
     if args.web:
