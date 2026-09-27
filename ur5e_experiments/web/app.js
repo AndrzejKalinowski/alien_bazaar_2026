@@ -158,7 +158,37 @@ function render(s) {
   $("targets").replaceChildren(...s.targets.map((t) => row([t.id, t.state, t.detail])));
 
   renderView(s);
+  renderHardware(s);
 }
+
+function renderHardware(s) {
+  $("hardware-panel").hidden = !s.teach;
+  if (!s.teach) return;
+  $("problems").replaceChildren(...s.config_problems.map((p) => {
+    const li = document.createElement("li"); li.textContent = `Brak gotowości: ${p}`; return li;
+  }));
+  const g = s.gripper, v = s.servos;
+  $("devices").textContent =
+    `Chwytak: ${g.connected ? g.grip + " (" + (g.state || "?") + ")" : "ROZŁĄCZONY"}` +
+    `  •  Serwa: ${v.connected ? (v.stopped ? "stoją" : "w ruchu") : "ROZŁĄCZONE"}` +
+    `  •  Robot: ${s.robot_fault || "OK"}${s.freedrive ? "  •  FREEDRIVE" : ""}`;
+  const teachEnabled = s.actions.includes("teach_capture");
+  $("teach-tools").hidden = !teachEnabled;
+  const idle = ["READY", "STOPPED", "FAULT", "COMPLETED"].includes(s.state);
+  for (const id of ["freedrive-on", "freedrive-off", "teach-grip", "teach-release"]) $(id).disabled = !idle;
+  $("poses").replaceChildren(...Object.entries(s.teach.poses).map(([name, captured]) => {
+    const button = document.createElement("button");
+    button.textContent = "Zapisz tu";
+    button.disabled = !idle;
+    button.addEventListener("click", () => command(`Zapis ${name}`, "/api/teach/capture", { name }));
+    return row([name, captured ? "tak" : "—", button]);
+  }));
+}
+
+$("freedrive-on").addEventListener("click", () => command("Freedrive", "/api/teach/freedrive", { on: true }));
+$("freedrive-off").addEventListener("click", () => command("Freedrive", "/api/teach/freedrive", { on: false }));
+$("teach-grip").addEventListener("click", () => command("Chwyt", "/api/teach/gripper", { action: "grip" }));
+$("teach-release").addEventListener("click", () => command("Zwolnienie", "/api/teach/gripper", { action: "release" }));
 
 function renderView(s) {
   const camera = s.camera || { available: false };

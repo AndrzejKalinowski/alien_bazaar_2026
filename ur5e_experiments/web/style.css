@@ -30,6 +30,7 @@ main { display: grid; gap: 12px; padding: 12px 16px; grid-template-columns: repe
 .state.STOPPING, .state.WAITING_OUTPUT { color: var(--warn); }
 .state.FAULT, .state.STOPPED { color: var(--stop); }
 .state.COMPLETED, .state.READY { color: var(--info); }
+.problems { color: var(--warn); margin: 0 0 8px; padding-left: 20px; }
 .fault { color: var(--stop); font-weight: 600; margin: 8px 0; overflow-wrap: anywhere; }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; align-items: center; }
 button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line);

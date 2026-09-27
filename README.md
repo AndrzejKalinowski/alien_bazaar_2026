@@ -16,7 +16,8 @@ repository root, run `python ur5e_experiments/system_main.py --simulate --fast`
 (CLI) or `python ur5e_experiments/system_main.py --simulate --web` (panel). See
 [supervisor usage and current scope](docs/supervisor.md) and the
 [implementation plan](docs/system_supervisor_plan.md). Hardware adapters for
-the robot, gripper and servos are the next milestone.
+the robot (SafeControl + watchdog), the gripper and the servos and a teach
+mode exist (`--hardware --web --teach`) but have only been tested against fakes.
 
 ---
 

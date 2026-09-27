@@ -334,3 +334,60 @@ def test_web_cli_reports_a_port_in_use(capsys):
     finally:
         blocker.close()
     assert "supervisor runner" in capsys.readouterr().err
+
+
+def test_service_runs_before_every_tick_and_while_stopping_at_shutdown():
+    loop, devices, clock = make_loop(count=1)
+    calls = []
+    loop.service = calls.append
+    loop.submit("start", command_id="s")
+    step_until(loop, clock, lambda: bool(devices.history))
+    assert len(calls) == loop._ticks
+    loop.period = 0.0
+    before = len(calls)
+    loop.service = lambda now: (calls.append(now), clock.advance(TICK_PERIOD))  # virtual time moves
+    loop._finish_stop("test")
+    assert len(calls) > before and loop.supervisor.state == State.STOPPED
+
+
+def test_extra_status_and_actions_are_published():
+    loop, _, _ = make_loop()
+    loop.extra_status = lambda: {"teach": {"poses": {}}}
+    loop.step()
+    status = loop.status()
+    assert status["teach"] == {"poses": {}} and status["actions"] == ["add_glasses"]
+
+
+@pytest.mark.parametrize("path,body,code", [
+    ("/api/teach/capture", {"name": "observe"}, 404),     # no --teach
+])
+def test_teach_routes_need_teach_mode(panel, path, body, code):
+    _, _, server, _ = panel
+    assert request(server, "POST", path, body)[0].status == code
+
+
+def test_teach_routes_validate_bodies(panel):
+    loop, _, server, _ = panel
+    loop.actions.update({"teach_capture": lambda p: Reply(True, p["name"]),
+                         "teach_freedrive": lambda p: Reply(True, "fd"),
+                         "teach_gripper": lambda p: Reply(True, "g")})
+    for path, body in (("/api/teach/capture", {}), ("/api/teach/freedrive", {"on": "yes"}),
+                       ("/api/teach/gripper", {"action": "blow"})):
+        assert request(server, "POST", path, body)[0].status == 400
+    response, body = request(server, "POST", "/api/teach/capture", {"name": "observe"})
+    assert response.status == 202
+    assert wait_command(server, json.loads(body)["id"])["message"] == "observe"
+
+
+@pytest.mark.parametrize("options", [
+    ["--hardware"],                                  # needs --web
+    ["--hardware", "--web"],                         # needs --camera or --teach
+    ["--hardware", "--web", "--teach", "--fail-at", "PICK"],
+    ["--simulate", "--web", "--teach"],              # teach is hardware only
+    ["--simulate", "--hardware", "--web"],           # exclusive modes
+])
+def test_hardware_cli_options_are_checked_before_connecting(options, capsys):
+    with pytest.raises(SystemExit) as error:
+        main(options)
+    assert error.value.code == 2
+    capsys.readouterr()

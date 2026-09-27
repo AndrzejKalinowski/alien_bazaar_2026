@@ -1,10 +1,11 @@
-# Supervisor: etapy 1–2 (rdzeń, panel WWW, kamera)
+# Supervisor: etapy 1–3 (rdzeń, panel WWW, kamera, adaptery sprzętu)
 
 Implementacja bazuje na `master` (`7c145d2`), na gałęzi
 `feature/system-supervisor`. Rdzeń realizuje pełny cykl na symulowanych
 urządzeniach i jest sterowany z CLI albo z panelu w przeglądarce.
-Żaden moduł supervisora nie otwiera RTDE ani portu szeregowego. Kamerę
-otwiera wyłącznie jawny tryb `--camera`. Detekcja różnicowa nie jest
+Połączenia z robotem, chwytakiem i serwami powstają wyłącznie w jawnym
+trybie `--hardware`, a kamera tylko z `--camera`. **Tryb sprzętowy nie był
+jeszcze uruchomiony na robocie**; sprawdzono go wyłącznie na atrapach. Detekcja różnicowa nie jest
 importowana ani przenoszona do tej gałęzi.
 
 ## Uruchomienie
@@ -125,8 +126,100 @@ był jeszcze uruchomiony z kamerą: przetestowano go wyłącznie offline.
 
 ## Tryb sprzętowy
 
-Flaga `--simulate` jest obowiązkowa. Tryb sprzętowy nie jest jeszcze
-zaimplementowany; program nie przełącza się do niego automatycznie.
+Wymagana jest dokładnie jedna z flag `--simulate` / `--hardware`.
+
+```powershell
+# Uczenie pozycji (bez partii): freedrive, chwyt/zwolnienie, zapis pozy.
+python ur5e_experiments/system_main.py --hardware --web --teach
+# Praca: szklanki z kamery, reszta sprzętowa.
+python ur5e_experiments/system_main.py --hardware --web --camera
+```
+
+`--hardware` łączy UR5e przez `safe_motion.connect()`, otwiera port chwytaka
+i magistrali serw, a watchdog RTDE uzbraja tuż przed startem pętli. **Od tej
+chwili ramię może się ruszać.** Otwarcie portu XIAO może zresetować
+mikrokontroler, więc przy starcie chwytak nie może trzymać szklanki. Porty
+nie są automatycznie otwierane ponownie. Miejsca odbioru startują jako
+`UNKNOWN`; operator potwierdza ich opróżnienie w panelu. START jest odrzucany
+(powód widać w panelu), gdy brakuje nauczonej pozy lub pomiaru stanowiska,
+zmienił się offset TCP, TCP ma przesunięcie x/y albo freedrive jest włączony.
+
+### Co robi adapter (`system_hardware.py`)
+
+Każdy krok receptury to plan akcji zbudowany z nauczonych póz i sprawdzony
+geometrycznie przed pierwszym ruchem. Warunki zakończenia są sprawdzane:
+
+| Krok | Plan | Warunek powodzenia |
+| --- | --- | --- |
+| PICK | przejazd nad strefę, podejście do punktu 3 cm przed ścianką, GRIP, ruch kontaktowy wzdłuż osi przyssawki (≤ 3,6 cm, 5 N) | kontakt siłowy i `GRIP OK` z żywym `HOLD YES` w 6 s |
+| LIFT | pionowo na wysokość przejazdu | poza osiągnięta |
+| FLIP | przejazd do pozy `flip`, obrót nadgarstka 3 o 180° (`moveJ`) | kąty osiągnięte, TCP nie przesunął się |
+| TO_/LEAVE_ stanowisk | podejście → praca; praca → podejście → wysokość przejazdu | pozy osiągnięte, drogi w korytarzach |
+| SPRAY_1/2 | 3 / 2 skoki pompki | każda pozycja serwa potwierdzona |
+| SPONGE | profil pozycji serwa gąbki | j.w., bez błędów statusu |
+| WIPE | nauczone pociągnięcia z `WIPE_SPEED` | siła ≤ `WIPE_MAX_FORCE`, pozy osiągnięte |
+| TO_OUTPUT, LOWER | nad pozę odbioru + 2 cm; ruch kontaktowy w dół (≤ 3,5 cm, 8 N) | **kontakt**; koniec drogi to błąd, bez RELEASE |
+| RELEASE | impuls zwolnienia | sterownik wraca do `IDLE` (koniec impulsu) |
+| RETREAT, OBSERVE | odsunięcie wzdłuż osi przyssawki, w górę; poza obserwacji | pozy osiągnięte |
+
+Ruchy liniowe są asynchroniczne. Ruch kontaktowy to `speedL` z czasem
+0,02 s odświeżany co takt. STOP unieważnia zadania urządzeń, wysyła
+`speedStop` i asynchroniczne `stopL`/`stopJ`, zatrzymuje serwa (pompka
+w spoczynek) i czeka na potwierdzenie; nigdy nie wyłącza podciśnienia.
+`ControlLoop.service()` kopie watchdog RTDE w każdym takcie, również podczas
+zatrzymywania przy zamykaniu, i sprawdza sufit TCP.
+
+Prędkości, siły kontaktu, odstępy i czasy chwytu pochodzą z
+`pick_place_glasses.py`. Nowe wartości w `system_hardware.py` są oznaczone
+„TO BE MEASURED”: `FLIP_SPEED`, `WIPE_SPEED`, `WIPE_MAX_FORCE`, liczby skoków
+pompki, profil gąbki i tolerancje. Limity Z pochodzą z `SafeControl`
+i `follow_april_tag`, nigdy z pliku układu. `PICK_TIMEOUT` nadzorcy wzrósł
+z 10 do 30 s, bo obejmuje teraz dojazd, ruch kontaktowy i potwierdzenie
+chwytu. To termin operacji, nie limit ruchu.
+
+### Plik uczenia `system_teach.json`
+
+Pozy zapisuje panel (`--teach`, poza partią, robot nieruchomy). Pozy
+stanowisk uczy się ze szklanką w chwytaku, otworem w dół. Offset TCP
+zapisany przy uczeniu musi zgadzać się z robotem. Wymiary szklanki
+i stanowisk operator wpisuje ręcznie po pomiarze:
+
+```json
+{
+  "version": 1,
+  "tcp_offset": [0, 0, 0.2, 0, 0, 0],
+  "poses": {"observe": {"pose": [0.3, -0.5, 0.35, 0, 1.571, 0], "q": [0, -1.57, 1.57, -1.57, -1.57, 0], "captured": "..."}},
+  "glass": {"radius": 0.03},
+  "layout": {
+    "tool_radius": 0.12, "clearance": 0.03,
+    "stations": {
+      "sprayer": {"low": [0.2, 0.25, 0.0], "high": [0.4, 0.45, 0.2],
+                  "corridor": {"low": [0.19, 0.04, 0.04], "high": [0.41, 0.41, 0.26]},
+                  "solid": [{"low": [0.28, 0.4, 0.0], "high": [0.32, 0.45, 0.2]}]},
+      "sponge": {"...": "..."}, "wiper": {"...": "..."}
+    }
+  }
+}
+```
+
+Wymagane pozy: `observe`, `side_grip` (przyssawka na ściance stojącej
+szklanki, narzędzie poziomo; używane są orientacja i wysokość), `flip`,
+`<stanowisko>.approach` i `.work` dla `sprayer`, `sponge`, `wiper`,
+`wiper.stroke.1..N` (kolejno) oraz `output.<miejsce>` (TCP, gdy odwrócona
+szklanka stoi na miejscu odbioru). Z (w metrach) jest w układzie bazy.
+`tool_radius` musi objąć chwytak ze szklanką w każdej orientacji.
+
+### Pierwsze uruchomienie na sprzęcie (do zrobienia przy robocie)
+
+1. `bus_servos.py scan`: potwierdzić ID serw (`SPRAYER_ID` = 1, gąbka =
+   `ROTATOR_ID` = 2) i kierunki; profil gąbki ustawić w `SPONGE_POSITIONS_DEG`.
+2. Na pendancie sprawdzić offset TCP (bez x/y) i płaszczyznę bezpieczeństwa.
+3. `--hardware --web --teach` bez szklanki: STOP w panelu, zamknięcie
+   przeglądarki (partia trwa), Ctrl+C (zatrzymanie urządzeń).
+4. Zmierzyć stanowiska i szklankę, nauczyć poz, wpisać układ.
+5. Pojedyncze kroki przy zmniejszonej prędkości na pendancie, ręka na
+   zatrzymaniu awaryjnym; dopiero potem pełny cykl jednej szklanki.
+
 Symulator odwzorowuje kolejność i stan operacji oraz sprawdza drogi TCP
 względem przykładowych brył stanowisk, z uwzględnieniem otoczki narzędzia
 i szklanki. Nie symuluje członów ramienia, podciśnienia fizycznego, kontaktu
@@ -217,6 +310,9 @@ adaptera muszą pochodzić z konfiguracji `SafeControl`, bez ich zwiększania.
 | `system_settings.py` | Parametry czasowe, bez nowych limitów ruchu fizycznego |
 | `system_web.py`, `web/` | Pętla właściciela nadzorcy, kolejka poleceń, serwer HTTP/SSE/MJPEG, panel |
 | `system_vision.py` | Okna pomiarowe, stabilne ID szklanek, wątek kamery z `GlassFinder` |
+| `system_hardware.py` | Adapter UR5e: plany kroków, warunki końcowe, STOP, watchdog, uczenie |
+| `system_io.py` | Wątki właścicieli portów chwytaka i magistrali serw |
+| `system_teach.py` | Nauczone pozy, pomiary układu, kontrola kompletności, zapis atomowy |
 
 Nadzorca ma jednego właściciela: `ControlLoop`. Panel przekazuje mu komendy
 kolejką; nie wolno wywoływać metod nadzorcy równolegle z kilku wątków. `DeviceAdapter`
@@ -245,11 +341,22 @@ w pętli zwrotnej. Testy wizji sprawdzają okna, mediany, odrzucanie odbić,
 utrzymanie i zmianę ID, niejednoznaczność, limit śledzonych celów oraz
 zewnętrzne źródło sceny symulatora. Kamera nie jest otwierana w testach.
 
-Następny etap według [planu](system_supervisor_plan.md) to etap 3: adaptery
-urządzeń (`SafeControl` + watchdog w `ControlLoop`, obsługa portów chwytaka
-i magistrali serw poza pętlą), walidacja konfiguracji i nauka stanowisk
-z panelu. Potem walidacja pojedynczej szklanki. Pozostają też: próba
-`--camera` na prawdziwym stole, rozdzielenie kamery i panelu do osobnych
-procesów, geometria obrotu, sprzętowe profile operacji, trwała zajętość
-miejsc po restarcie oraz blokada drugiej instancji niezależna od portu. Nowe uruchomienie symulatora tworzy nowy fikcyjny świat;
+Testy sprzętowe na atrapach (`tests/fake_robot.py`): pełny cykl ze
+sprawdzeniem wszystkich warunków końcowych, brak kontaktu przy chwycie
+i odkładaniu (bez RELEASE), niepotwierdzony chwyt (podciśnienie zostaje),
+ruch zakończony poza celem, błąd serwa, STOP z asynchronicznym `stopL`,
+zadziałanie watchdoga, ruch robota między walidacją a startem, droga przez
+stanowisko, niekompletny plik uczenia, zmieniony offset TCP, freedrive,
+zapis pozy tylko poza partią. Wątki I/O: mapowanie stanu chwytu,
+potwierdzenie końca impulsu zwolnienia i jego brak, STOP bez zwolnienia,
+utrata USB, potwierdzanie pozycji serw, zablokowane serwo, błąd statusu,
+anulowanie sprysku i niepotwierdzone zatrzymanie.
+
+Etap 3 w części offline jest zrobiony. Pozostaje praca przy robocie
+(lista wyżej), potem etapy 4–7 [planu](system_supervisor_plan.md).
+Otwarte punkty: próba `--camera` na stole; OBSERVE musi czekać na pomiar
+kamery rozpoczęty po zjeździe ramienia z pola widzenia; osobne procesy dla
+kamery i panelu; trwała zajętość miejsc po restarcie; blokada drugiej
+instancji niezależna od portu; kontrola członów UR5e i łuków `moveJ`
+poza sufitem `SafeControl`; przejęcie sterowania gamepadem. Nowe uruchomienie symulatora tworzy nowy fikcyjny świat;
 dziennik nie służy do automatycznego wznawiania ruchu.

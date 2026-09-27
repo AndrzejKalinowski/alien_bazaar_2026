@@ -8,7 +8,8 @@ TICK_PERIOD = 0.02             # s, nominal supervisor period
 TELEMETRY_MAX_AGE = 0.5        # s, oldest contributing device sample
 SCENE_MAX_AGE = 0.5            # s, latest observation before a pick
 FUTURE_TOLERANCE = 0.05        # s, reject invalid timestamps
-PICK_TIMEOUT = 10.0           # s, allows the firmware's 8 s grip confirmation
+PICK_TIMEOUT = 30.0           # s, travel from OBSERVE at 0.15/0.05 m/s + contact move
+                              # + grip confirmation (6 s); a deadline, not a motion limit
 MOTION_TIMEOUT = 30.0         # s
 STATION_TIMEOUT = 30.0        # s
 RELEASE_TIMEOUT = 3.0         # s, firmware release pulse is 1.5 s

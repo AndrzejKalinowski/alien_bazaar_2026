@@ -70,6 +70,26 @@
     </table>
   </section>
 
+  <section class="panel wide" id="hardware-panel" hidden>
+    <h2>Urządzenia i uczenie</h2>
+    <ul id="problems" class="problems"></ul>
+    <p id="devices" class="muted"></p>
+    <div id="teach-tools" hidden>
+      <p class="muted">Ustaw ramię (freedrive albo pendant), zatrzymaj je i zapisz pozę.
+        Pozycje stanowisk ucz ze szklanką w chwytaku, otworem w dół.</p>
+      <div class="buttons">
+        <button id="freedrive-on">Freedrive: włącz</button>
+        <button id="freedrive-off">Freedrive: wyłącz</button>
+        <button id="teach-grip">Chwyć</button>
+        <button id="teach-release">Puść</button>
+      </div>
+      <table>
+        <thead><tr><th>Poza</th><th>Zapisana</th><th></th></tr></thead>
+        <tbody id="poses"></tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="panel wide" id="log-panel">
     <h2>Zdarzenia</h2>
     <ol id="log" class="log" reversed></ol>

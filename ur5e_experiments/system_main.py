@@ -1,4 +1,4 @@
-"""Run the supervisor with simulated devices, from the CLI or the web panel.
+"""Run the supervisor: simulated devices (CLI or web panel) or the real cell.
 
 From the repository root:
     python ur5e_experiments/system_main.py --simulate --fast
@@ -7,6 +7,8 @@ From the repository root:
     python ur5e_experiments/system_main.py --simulate --fast --stop-at WIPE
     python ur5e_experiments/system_main.py --simulate --web
     python ur5e_experiments/system_main.py --simulate --web --camera
+    python ur5e_experiments/system_main.py --hardware --web --teach
+    python ur5e_experiments/system_main.py --hardware --web --camera
 
 --web serves the panel (system_web.py) and waits for START from the browser;
 it prints the panel link with the control token. --host 0.0.0.0 opens it to
@@ -16,8 +18,15 @@ operations so the cycle can be followed. The panel can add fictional glasses.
 (system_vision.py, needs OpenCV and the overhead calibration); the robot,
 gripper and stations stay simulated. Ctrl+C stops the devices, then exits.
 
---simulate is required. There is no hardware mode and no implicit connection
-to robot, camera or serial ports. --fast advances a virtual monotonic clock.
+Exactly one of --simulate / --hardware is required; nothing connects by default.
+--hardware (system_hardware.py, NOT YET TRIED ON THE ROBOT) connects the UR5e
+through SafeControl, the gripper and the servo bus, and needs --web. The arm
+can move once it has started. It needs --camera for batches; --teach adds
+freedrive, manual grip/release and pose capture to the panel (outside
+batches), to fill system_teach.json. Output places start UNKNOWN: confirm
+them empty in the panel. START stays refused while the teach file or layout
+is incomplete, the TCP offset changed, or freedrive is on.
+--fast advances a virtual monotonic clock.
 Without it the same fake sequence runs in wall time; Ctrl+C requests STOP.
 --auto-clear-output simulates an operator emptying the output between glasses.
 --journal PATH writes JSON Lines to a NEW file; existing files are not replaced.
@@ -29,7 +38,8 @@ With --web: 0 after Ctrl+C with confirmed stopped devices, 1 start-up error
 (e.g. port in use: another supervisor is running), 2 fault or loop failure.
 Paths are checked against fictional station bounds and a tool/glass envelope;
 these example dimensions are not a calibration for real hardware.
-Requires: Python 3.12+ standard library only.
+Requires: Python 3.12+ standard library only (--camera: OpenCV;
+--hardware: ur_rtde, numpy, pyserial).
 """
 
 import argparse
@@ -85,25 +95,37 @@ def run_web(args, targets, slots):
                 vision.start()
                 stack.callback(vision.close)
                 stack.callback(frames.close)
-            devices = SimulatedDevices([] if args.camera else targets, operation_time=args.step_time,
-                                       fail_at=Step(args.fail_at) if args.fail_at else None,
-                                       scene_source=vision)
-            supervisor = Supervisor(devices, slots)
-
-            def add_glasses(payload):
-                return Reply(True, "added " + ", ".join(devices.add_targets(payload.get("count"))))
-
             def write_events(events):
                 for event in events:
                     journal.write(json.dumps(event, ensure_ascii=True) + "\n")
                 if events:
                     journal.flush()
 
-            loop = system_web.ControlLoop(
-                supervisor, actions={} if args.camera else {"add_glasses": add_glasses},
-                world=devices.snapshot, sinks=[write_events] if journal else ())
+            sinks = [write_events] if journal else ()
+            if args.hardware:
+                import system_hardware  # ur_rtde, numpy, pyserial only in this mode
+                devices = system_hardware.connect([slot.id for slot in slots], vision)
+                stack.callback(devices.close)
+                supervisor = Supervisor(devices, slots)
+                loop = system_web.ControlLoop(
+                    supervisor, sinks=sinks, service=devices.service, extra_status=devices.panel_status,
+                    actions=system_hardware.teach_actions(devices, supervisor) if args.teach else {})
+            else:
+                devices = SimulatedDevices([] if args.camera else targets, operation_time=args.step_time,
+                                           fail_at=Step(args.fail_at) if args.fail_at else None,
+                                           scene_source=vision)
+                supervisor = Supervisor(devices, slots)
+
+                def add_glasses(payload):
+                    return Reply(True, "added " + ", ".join(devices.add_targets(payload.get("count"))))
+
+                loop = system_web.ControlLoop(
+                    supervisor, actions={} if args.camera else {"add_glasses": add_glasses},
+                    world=devices.snapshot, sinks=sinks)
             server = system_web.serve(loop, args.host, args.port, args.token, frames)
             stack.callback(server.server_close)
+            if args.hardware:
+                devices.arm()  # watchdog: the owner loop must start right now
             owner = threading.Thread(target=loop.run, name="supervisor-owner")
             owner.start()
             threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
@@ -133,8 +155,10 @@ def run_web(args, targets, slots):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--simulate", action="store_true", required=True,
-                        help="use in-memory devices; hardware mode is not implemented")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--simulate", action="store_true", help="in-memory robot, gripper and servos")
+    mode.add_argument("--hardware", action="store_true",
+                      help="the real cell (needs --web; the arm can move)")
     parser.add_argument("--fast", action="store_true", help="run with virtual time")
     parser.add_argument("--glasses", type=positive_count, default=3)
     parser.add_argument("--slots", type=positive_count, default=3)
@@ -151,7 +175,17 @@ def main(argv=None):
     web.add_argument("--camera", action="store_true", help="targets from the overhead camera")
     web.add_argument("--step-time", type=step_time, default=SIM_OPERATION_TIME,
                      help="s per simulated operation")
+    web.add_argument("--teach", action="store_true", help="hardware: freedrive and pose capture in the panel")
     args = parser.parse_args(argv)
+    if args.hardware:
+        if not args.web:
+            parser.error("--hardware needs --web (STOP and status come from the panel)")
+        if not (args.camera or args.teach):
+            parser.error("--hardware needs --camera for batches (or --teach to teach poses)")
+        if args.fail_at or args.step_time != SIM_OPERATION_TIME:
+            parser.error("--fail-at and --step-time are simulation options")
+    elif args.teach:
+        parser.error("--teach needs --hardware")
     if args.web:
         if args.fast or args.stop_at or args.auto_clear_output:
             parser.error("--fast, --stop-at and --auto-clear-output are CLI-only; use the panel")
@@ -162,7 +196,9 @@ def main(argv=None):
 
     clock = SimulationClock() if args.fast else monotonic
     targets = [GlassTarget(f"glass-{i + 1}", 0.1 + i * 0.1, -0.4) for i in range(args.glasses)]
-    slots = [OutputSlot(f"tag-{i + 1}", SlotState.FREE) for i in range(args.slots)]
+    # Real output places are unknown until the operator confirms them empty.
+    slots = [OutputSlot(f"tag-{i + 1}", SlotState.UNKNOWN if args.hardware else SlotState.FREE)
+             for i in range(args.slots)]
     if args.web:
         return run_web(args, targets, slots)
     devices = SimulatedDevices(targets, operation_time=args.step_time,

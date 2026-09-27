@@ -25,6 +25,9 @@ needs server -> browser updates and commands already use HTTP):
     POST /api/fault/reset           {}
     POST /api/output/confirm-cleared  {"slot_ids": ["tag-1", ...]}
     POST /api/sim/add-glasses       {"count": 3} (simulation only)
+    POST /api/teach/capture         {"name": "sprayer.work"}   (--teach only)
+    POST /api/teach/freedrive       {"on": true}                (--teach only)
+    POST /api/teach/gripper         {"action": "grip"|"release"} (--teach only)
 
 Access: GET is open (viewing needs no control rights). POST needs the session
 token in the X-Supervisor-Token header, a JSON body and, if the browser sends
@@ -78,7 +81,7 @@ STATIC_FILES = {"/": ("index.html", "text/html; charset=utf-8"),
 CONTENT_SECURITY_POLICY = ("default-src 'self'; img-src 'self'; style-src 'self'; "
                            "script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
 
-COMMANDS = ("start", "reset", "confirm_cleared", "add_glasses")
+BUILTIN_COMMANDS = ("start", "reset", "confirm_cleared")
 
 
 class EventHub:
@@ -152,15 +155,20 @@ class ControlLoop:
     actions: extra owner-thread commands, e.g. {"add_glasses": callable(payload)
     -> Reply}. world: callable returning a JSON-ready dict for the panel map.
     sinks: callables that get each list of drained events (journal writer).
+    service: callable(now) run in every step BEFORE supervisor.tick(), also
+    while stopping at shutdown (hardware: RTDE watchdog kick, ceiling check).
+    extra_status: callable returning a dict merged into the published status.
     """
 
     def __init__(self, supervisor, period=TICK_PERIOD, actions=None, world=None, sinks=(),
-                 wall_clock=monotonic):
+                 wall_clock=monotonic, service=None, extra_status=None):
         self.supervisor = supervisor
         self.period = period
         self.actions = dict(actions or {})
         self.world = world
         self.sinks = tuple(sinks)
+        self.service = service
+        self.extra_status = extra_status
         self.wall_clock = wall_clock
         self.events = EventHub()
         self.error = ""
@@ -191,8 +199,7 @@ class ControlLoop:
 
     def submit(self, kind, payload=None, command_id=None):
         """Queue an operator command; returns its result record (a copy)."""
-        if kind not in COMMANDS or (kind not in ("start", "reset", "confirm_cleared")
-                                    and kind not in self.actions):
+        if kind not in BUILTIN_COMMANDS and kind not in self.actions:
             raise ValueError(f"unknown command {kind!r}")
         command_id = command_id or uuid4().hex
         with self._lock:
@@ -283,10 +290,15 @@ class ControlLoop:
                 except Exception as exc:  # refuse, never let an operator command end the loop
                     reply = Reply(False, f"{kind} refused: {exc}")
                 self._finish(command_id, kind, reply)
+        self._service()
         self.supervisor.tick()
         self._ticks += 1
         self._max_tick = max(self._max_tick, self.wall_clock() - started)
         self._publish()
+
+    def _service(self):
+        if self.service is not None:
+            self.service(self.wall_clock())
 
     def _publish(self):
         events = self.supervisor.drain_events()
@@ -296,10 +308,13 @@ class ControlLoop:
         status = self.supervisor.status()
         status["event_sequence"] = self.events.last
         status["recipe"] = [spec.step.value for spec in RECIPE]
+        status["actions"] = sorted(self.actions)
         status["loop"] = {"heartbeat": self.wall_clock(), "ticks": self._ticks,
                           "max_tick": self._max_tick, "error": self.error,
                           "pending_commands": self._queue.qsize()}
         status["world"] = self.world() if self.world else None
+        if self.extra_status is not None:
+            status.update(self.extra_status())
         with self._lock:
             self._status = status
 
@@ -313,6 +328,7 @@ class ControlLoop:
         deadline = self.wall_clock() + STOP_TIMEOUT + 4 * self.period
         while sup.state == State.STOPPING and self.wall_clock() < deadline:
             sleep(self.period)
+            self._service()
             sup.tick()
         self._publish()
 
@@ -540,6 +556,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                 if not isinstance(count, int) or isinstance(count, bool):
                     raise RequestError(HTTPStatus.BAD_REQUEST, "count must be an integer")
                 record = loop.submit("add_glasses", {"count": count})
+            elif path.startswith("/api/teach/"):
+                record = self._teach(path.removeprefix("/api/teach/"), body)
             else:
                 raise RequestError(HTTPStatus.NOT_FOUND, "not found")
         except RequestError as exc:
@@ -547,6 +565,20 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         status = HTTPStatus.SERVICE_UNAVAILABLE if record["status"] == "refused" else HTTPStatus.ACCEPTED
         self._json(status, record)
+
+
+    def _teach(self, action, body):
+        loop = self.server.loop
+        kind = f"teach_{action}"
+        if kind not in loop.actions:
+            raise RequestError(HTTPStatus.NOT_FOUND, "teaching needs --teach")
+        if action == "capture" and not valid_id(body.get("name")):
+            raise RequestError(HTTPStatus.BAD_REQUEST, "name is required")
+        if action == "freedrive" and not isinstance(body.get("on"), bool):
+            raise RequestError(HTTPStatus.BAD_REQUEST, "on must be true or false")
+        if action == "gripper" and body.get("action") not in ("grip", "release"):
+            raise RequestError(HTTPStatus.BAD_REQUEST, "action must be grip or release")
+        return loop.submit(kind, body)
 
 
 def serve(loop, host=DEFAULT_HOST, port=DEFAULT_PORT, token=None, frames=None, verbose=False):
