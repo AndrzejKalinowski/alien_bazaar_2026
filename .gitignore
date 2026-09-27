@@ -12,3 +12,9 @@ __pycache__/
 # OS / editor cruft
 Thumbs.db
 desktop.ini
+
+# Supervisor runtime state (per cell, recreated at run time)
+ur5e_experiments/logs/
+ur5e_experiments/system_outputs.json
+ur5e_experiments/system_outputs.json.tmp
+ur5e_experiments/supervisor.lock

@@ -110,7 +110,12 @@ kamery, rozdzielczość i obszar detekcji (`detection_area.json`) pochodzą
 z `find_glasses.py`. Obszar musi obejmować tylko strefę wejściową, bez
 stanowisk i tagów odbioru. Szklanki muszą stać otworem do góry.
 
-`system_vision.py` czyta klatki we własnym wątku. Z klatek w oknie 0,3 s
+`system_vision.py` uruchamia kamerę w **osobnym procesie** (`multiprocessing`,
+`spawn`). Proces kamery otwiera kamerę i kalibrację, wykrywa szklanki i przez
+potok wysyła tylko gotowe pomiary i podgląd JPEG, więc przetwarzanie obrazu
+nie konkuruje z pętlą sterowania o GIL. Błąd otwarcia kamery przerywa start
+programu. Gdy proces kamery zginie, pomiar się zestarzeje, a nadzorca
+zatrzyma partię. Z klatek w oknie 0,3 s
 tworzy jeden pomiar: szklanka musi być wykryta w co najmniej połowie
 klatek okna. Mniej niż 5 klatek w oknie nie daje pomiaru; obraz staje się
 nieaktualny, a nadzorca zatrzymuje partię. Dzięki temu trzy kolejne pomiary
@@ -139,10 +144,25 @@ python ur5e_experiments/system_main.py --hardware --web --camera
 i magistrali serw, a watchdog RTDE uzbraja tuż przed startem pętli. **Od tej
 chwili ramię może się ruszać.** Otwarcie portu XIAO może zresetować
 mikrokontroler, więc przy starcie chwytak nie może trzymać szklanki. Porty
-nie są automatycznie otwierane ponownie. Miejsca odbioru startują jako
-`UNKNOWN`; operator potwierdza ich opróżnienie w panelu. START jest odrzucany
-(powód widać w panelu), gdy brakuje nauczonej pozy lub pomiaru stanowiska,
-zmienił się offset TCP, TCP ma przesunięcie x/y albo freedrive jest włączony.
+nie są automatycznie otwierane ponownie. START jest odrzucany (powód widać
+w panelu), gdy brakuje nauczonej pozy lub pomiaru stanowiska, zmienił się
+offset TCP, TCP ma przesunięcie x/y, freedrive jest włączony albo ramię stoi
+dalej niż 5 cm od pozy `observe` (kamera musi widzieć stół). Braki
+konfiguracji blokują tylko START; RESET po błędzie pozostaje możliwy.
+
+- **Zajętość miejsc odbioru** jest zapisywana w `system_outputs.json` po
+  każdej zmianie. Restart nigdy nie zwalnia miejsca: `RESERVED` wraca jako
+  `UNKNOWN`, a po nieczystym zakończeniu (awaria, partia w toku) także `FREE`
+  wraca jako `UNKNOWN`. Brak lub uszkodzenie pliku oznacza wszystkie `UNKNOWN`.
+- **Jedna instancja**: `supervisor.lock` jest blokowany na czas działania
+  procesu; system zwalnia go także po awarii.
+- **Dziennik**: zdarzenia zawsze trafiają do `logs/supervisor-<data>.jsonl`
+  (albo do pliku z `--journal`).
+- **`--gamepad`**: dowolny ruch drążka podczas partii wysyła STOP; poza
+  partią drążki przesuwają ramię (`gamepad_jog.Jogger`, sufit `SafeControl`
+  i `MIN_TCP_Z`), np. do pozy `observe`.
+- **OBSERVE** kończy się dopiero pomiarem kamery, którego okno zaczęło się
+  po dojeździe ramienia; żadna klatka tego pomiaru nie pokazuje ramienia.
 
 ### Co robi adapter (`system_hardware.py`)
 
@@ -176,6 +196,33 @@ pompki, profil gąbki i tolerancje. Limity Z pochodzą z `SafeControl`
 i `follow_april_tag`, nigdy z pliku układu. `PICK_TIMEOUT` nadzorcy wzrósł
 z 10 do 30 s, bo obejmuje teraz dojazd, ruch kontaktowy i potwierdzenie
 chwytu. To termin operacji, nie limit ruchu.
+
+### Kontrola całego ramienia (`system_arm.py`)
+
+Przed wysłaniem planu adapter odtwarza przebieg kątów stawów od aktualnej
+konfiguracji robota. Dla `moveL` robi to kinematyką odwrotną co 1 cm lub
+0,05 rad, rozwiązywaną w pobliżu poprzedniej próbki, tak jak sterownik.
+Dla obrotu nadgarstka (`moveJ`) interpoluje liniowo kąty. Plan jest
+odrzucany przed ruchem, gdy:
+
+- pozy nie da się osiągnąć po linii prostej;
+- między próbkami następuje skok stawów (osobliwość, zmiana konfiguracji);
+- przekroczony zostałby limit stawu;
+- ramię, przedramię, nadgarstek albo korpus chwytaka (kapsuły wzdłuż
+  łańcucha DH) zbliżają się do bryły stanowiska na mniej niż promień
+  członu plus `clearance`.
+
+Nadgarstek i chwytak mogą wejść w bryłę aktywnego stanowiska tylko wewnątrz
+jego korytarza, tak jak narzędzie. Walidacja długiej trasy trwa dłużej niż
+okres watchdoga, więc w trakcie liczenia watchdog jest kopany.
+
+Ograniczenia modelu: nominalne parametry DH UR5e (bez kalibracji
+konkretnego robota), szacunkowe promienie członów i przesunięcie barku
+(„TO BE MEASURED”), bez podstawy, barku, stołu i przeszkód spoza modelu.
+Przy każdej próbie START model jest porównywany z pozą TCP raportowaną
+przez robota. Rozbieżność powyżej 5 mm lub 1° blokuje START. Ostateczną
+ochroną pozostają ustawienia bezpieczeństwa robota (płaszczyzny, limity
+stawów).
 
 ### Plik uczenia `system_teach.json`
 
@@ -313,6 +360,7 @@ adaptera muszą pochodzić z konfiguracji `SafeControl`, bez ich zwiększania.
 | `system_hardware.py` | Adapter UR5e: plany kroków, warunki końcowe, STOP, watchdog, uczenie |
 | `system_io.py` | Wątki właścicieli portów chwytaka i magistrali serw |
 | `system_teach.py` | Nauczone pozy, pomiary układu, kontrola kompletności, zapis atomowy |
+| `system_arm.py` | Kinematyka UR5e, przebieg stawów planu, kolizje członów ze stanowiskami |
 
 Nadzorca ma jednego właściciela: `ControlLoop`. Panel przekazuje mu komendy
 kolejką; nie wolno wywoływać metod nadzorcy równolegle z kilku wątków. `DeviceAdapter`
@@ -354,9 +402,12 @@ anulowanie sprysku i niepotwierdzone zatrzymanie.
 
 Etap 3 w części offline jest zrobiony. Pozostaje praca przy robocie
 (lista wyżej), potem etapy 4–7 [planu](system_supervisor_plan.md).
-Otwarte punkty: próba `--camera` na stole; OBSERVE musi czekać na pomiar
-kamery rozpoczęty po zjeździe ramienia z pola widzenia; osobne procesy dla
-kamery i panelu; trwała zajętość miejsc po restarcie; blokada drugiej
-instancji niezależna od portu; kontrola członów UR5e i łuków `moveJ`
-poza sufitem `SafeControl`; przejęcie sterowania gamepadem. Nowe uruchomienie symulatora tworzy nowy fikcyjny świat;
+Panel pozostaje w procesie nadzorcy, w wątkach. Serwer HTTP głównie czeka
+na sieć. Zmierzony najdłuższy takt pętli przy 8 otwartych strumieniach SSE
+i pełnej partii w symulacji wyniósł 7,8 ms, wobec okresu 20 ms i 200 ms
+watchdoga. Pomiar trzeba powtórzyć na docelowym laptopie z kamerą; status
+pokazuje go jako `loop.max_tick`.
+
+Otwarte punkty: próba `--camera` na stole; pomiar promieni członów
+i przesunięcia barku; pomiar czasów pętli na docelowym laptopie. Nowe uruchomienie symulatora tworzy nowy fikcyjny świat;
 dziennik nie służy do automatycznego wznawiania ruchu.

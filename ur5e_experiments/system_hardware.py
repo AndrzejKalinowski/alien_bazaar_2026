@@ -49,6 +49,7 @@ from uuid import uuid4
 import numpy as np
 
 import bus_servos
+import system_arm
 from robot_watchdog import RobotWatchdog
 from safe_motion import MotionRefused
 from system_geometry import STATION_ACCESS, CollisionRefused
@@ -94,6 +95,9 @@ ROTATION_TOLERANCE_DEG = 2.0 # deg
 JOINT_TOLERANCE_DEG = 1.0    # deg, moveJ finished
 MOVE_START_GRACE = 0.2       # s before "no async operation" can mean finished
 PREPARED_TOLERANCE = 0.005   # m, robot may not move between validation and begin
+OBSERVE_START_TOLERANCE = 0.05  # m, START needs the arm at the observe pose (camera view clear)
+ARM_MODEL_TOLERANCE = 0.005     # m, nominal-DH TCP vs the pose the robot reports
+ARM_MODEL_TOLERANCE_DEG = 1.0   # deg
 STOPPED_SPEED = 0.002        # m/s, TCP speed counted as stopped
 
 
@@ -266,6 +270,24 @@ class WaitGrip(Action):
 
 
 @dataclass
+class WaitFreshScene(Action):
+    """OBSERVE ends only with a camera window that began after the arm arrived."""
+    label: str = "fresh camera measurement"
+
+    def start(self, hw, now):
+        self.arrived = now
+
+    def poll(self, hw, now):
+        try:
+            scene = hw.vision.observe(now)
+        except ValueError as exc:
+            raise ActionFailed(f"camera: {exc}") from None
+        if scene.window_start is not None and scene.window_start > self.arrived:
+            return f"scene {scene.sequence}"
+        return None
+
+
+@dataclass
 class Plan:
     command: object
     start: list
@@ -277,13 +299,14 @@ class Plan:
 
 class HardwareDevices:
     def __init__(self, rtde_r, control, gripper, servos, teach, vision, min_tcp_z, max_tcp_z,
-                 clock=monotonic, watchdog_factory=RobotWatchdog):
+                 clock=monotonic, watchdog_factory=RobotWatchdog, arm_model=True):
         self.r, self.c = rtde_r, control
         self.gripper, self.servos = gripper, servos
         self.teach, self.vision = teach, vision
         self.min_tcp_z, self.max_tcp_z = min_tcp_z, max_tcp_z
         self.clock = clock
         self.watchdog_factory = watchdog_factory
+        self.arm_model = arm_model   # False only in tests whose fake robot has no kinematics
         self.watchdog = None
         self.robot_fault = ""
         self.config_problems = []
@@ -345,11 +368,26 @@ class HardwareDevices:
         connected = self.r.isConnected() and self.c.isConnected() and g["connected"] and s["connected"]
         fault = (self.robot_fault or g["fault"] or s["fault"]
                  or ("freedrive is on" if self.freedrive else "")
-                 or ("; ".join(s["errors"]["SPRAYER"] + s["errors"]["SPONGE"]))
-                 or ("not ready: " + "; ".join(self.config_problems) if self.config_problems else ""))
+                 or ("; ".join(s["errors"]["SPRAYER"] + s["errors"]["SPONGE"])))
         observed_at = min(now, g["observed_at"], s["observed_at"])
         return Telemetry(observed_at, connected, g["grip"], self.supported,
                          self._idle(), s["stopped"], fault)
+
+    def start_problems(self):
+        problems = list(self.config_problems)
+        if self.arm_model:
+            T = system_arm.tcp_matrix(self.r.getActualQ(), system_arm.pose_matrix(self.c.getTCPOffset()))
+            model = [*T[:3, 3], *system_arm.rotvec(T[:3, :3])]
+            position, angle = pose_error(model, self.r.getActualTCPPose())
+            if position > ARM_MODEL_TOLERANCE or angle > radians(ARM_MODEL_TOLERANCE_DEG):
+                problems.append(f"arm model is {position * 1000:.1f} mm / {np.degrees(angle):.1f} deg off "
+                                "the robot's TCP pose; the whole-arm check cannot be trusted")
+        if not problems:
+            distance, _ = pose_error(self.r.getActualTCPPose(), self.teach.pose("observe"))
+            if distance > OBSERVE_START_TOLERANCE:
+                problems.append(f"arm is {distance * 100:.0f} cm from the observe pose; "
+                                "move it there (pendant, freedrive or gamepad) so the camera sees the table")
+        return problems
 
     def observe(self, now):
         if self.vision is None:
@@ -365,7 +403,35 @@ class HardwareDevices:
         start = list(self.r.getActualTCPPose())
         path, actions = self._plan(command, start)
         checked = self.workspace.validate_path(path, command.step)
+        if self.arm_model:
+            self._check_arm(command.step, actions)
         self._prepared = Plan(command, start, checked, actions)
+
+    def _keepalive(self):
+        if self.watchdog is not None:
+            self.watchdog.kick()
+
+    def _check_arm(self, step, actions):
+        """Joint path of the whole plan from the actual joints; links vs stations."""
+        T_tool = system_arm.pose_matrix(self.c.getTCPOffset())
+        q = np.asarray(self.r.getActualQ(), dtype=float)
+        pose = list(self.r.getActualTCPPose())
+        for action in actions:
+            if isinstance(action, MoveL):
+                targets = [action.pose]
+            elif isinstance(action, Contact):
+                end = np.asarray(pose[:3]) + np.asarray(action.direction, dtype=float) /                     np.linalg.norm(action.direction) * action.travel
+                targets = [[*end, *pose[3:]]]
+            elif isinstance(action, FlipWrist):
+                samples = system_arm.joint_path(q, flip_joints(q))
+                system_arm.check_arm(samples, self.workspace, step, T_tool)
+                q = samples[-1]
+                continue
+            else:
+                continue
+            samples = system_arm.cartesian_joint_path(q, targets, T_tool, self._keepalive)
+            system_arm.check_arm(samples, self.workspace, step, T_tool)
+            q, pose = samples[-1], list(targets[-1])
 
     def begin(self, command):
         plan = self._prepared
@@ -520,7 +586,11 @@ class HardwareDevices:
         self.gripper.close()
 
     def panel_status(self):
-        return {"teach": self.teach.status(), "config_problems": list(self.config_problems),
+        try:
+            problems = self.start_problems()
+        except Exception as exc:  # the panel status must never break the loop
+            problems = [f"readiness check failed: {exc}"]
+        return {"teach": self.teach.status(), "config_problems": problems,
                 "gripper": {k: (v.value if isinstance(v, Grip) else v)
                             for k, v in self.gripper.snapshot().items() if k != "observed_at"},
                 "servos": {k: v for k, v in self.servos.snapshot().items() if k != "observed_at"},
@@ -599,7 +669,8 @@ class HardwareDevices:
         if step == Step.RELEASE:
             return [start[:3]], [DeviceJob("gripper", "release", "release")]
         if step == Step.OBSERVE:
-            return self._transfer(start, teach.pose("observe"))
+            path, actions = self._transfer(start, teach.pose("observe"))
+            return path, actions + [WaitFreshScene()]
         raise CollisionRefused(f"no hardware plan for {step.value}")
 
     @staticmethod
@@ -672,3 +743,40 @@ def connect(slot_ids, vision, teach_path=None):
         gripper.close()
         raise
     return HardwareDevices(r, c, gripper, servos, teach, vision, MIN_TCP_Z, safe_motion.MAX_TCP_Z)
+
+
+ACTIVE_STATES = (State.RUNNING, State.WAITING_OUTPUT, State.STOPPING)
+
+
+class GamepadOverride:
+    """Local gamepad: any stick input STOPs a batch; when idle it jogs the arm.
+
+    Call update() from the owner loop (ControlLoop.service), after hw.service().
+    Jogging uses gamepad_jog.Jogger through SafeControl (ceiling) with the
+    table guard MIN_TCP_Z, like the other scripts; never during a plan or
+    freedrive. A jogging arm is not "stopped", so START waits for release.
+    """
+
+    def __init__(self, hw, gamepad, state, request_stop):
+        from gamepad_jog import Jogger
+        self.hw, self.gamepad = hw, gamepad
+        self.state, self.request_stop = state, request_stop
+        self.jogger = Jogger(hw.c, gamepad, hw.min_tcp_z, hw.max_tcp_z)
+        self._stop_sent = False
+
+    def update(self, now):
+        speed = self.gamepad.jog_speed()
+        state = self.state()
+        if state in ACTIVE_STATES:
+            self.jogger.stop()
+            if speed is not None and state != State.STOPPING and not self._stop_sent:
+                self.request_stop("gamepad override")
+                self._stop_sent = True
+            return
+        self._stop_sent = False
+        can_jog = self.hw._active is None and not self.hw.freedrive and not self.hw.robot_fault
+        self.jogger.update(self.hw.r.getActualTCPPose(), enabled=can_jog)
+
+    def close(self):
+        self.jogger.stop()
+        self.gamepad.close()
