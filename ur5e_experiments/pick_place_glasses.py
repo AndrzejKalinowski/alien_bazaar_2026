@@ -130,8 +130,11 @@ Side grip: the grip orientation is taught: jog the cup onto a glass wall exactly
   the gripper must fit between the glasses on the robot side of the target.
 
 Keys (video window) / gamepad:
-  p  / Y (north)   run SEQUENCE on one glass (default: flip it, then place it);
-                   with GO_TO_START_FIRST the arm goes to START_Q first
+  p  / Y (north)   run SEQUENCE on every glass, one after another (PICK_ALL;
+                   False: one glass per p): after each one, back at the start
+                   pose, measure again and do the next, until no glass or no
+                   free place tag is left or one fails; s / sticks stop it.
+                   With GO_TO_START_FIRST the arm goes to START_Q first
   s  / A (south)   stop / abort (vacuum stays as it is)
   g  / B (east)    grip (vacuum on)
   r  / X (west)    release
@@ -241,13 +244,13 @@ TURN_OVER_START = False      # True: tool turns go back over the start position 
 SEQUENCE = ["pick_side", "flip", "set_down", "pick_top", "spray", "sponge", "dry", "place"]
 
 # --- flip -----------------------------------------------------------------------
-FLIP_SPEED = 0.9             # rad/s, wrist 3 turn with the glass held (was 0.5, raised for speed)
-FLIP_ACCEL = 0.9             # rad/s^2 (was 0.5)
+FLIP_SPEED = 1.2             # rad/s, wrist 3 turn with the glass held (was 0.5, 0.9)
+FLIP_ACCEL = 1.2             # rad/s^2 (was 0.5, 0.9)
 MAX_TCP_XY_OFFSET = 0.005    # m, the flip turns around the flange axis: a TCP off it would swing the glass
 
 # --- tool turns (see SequenceTask.turn) ------------------------------------------------
-TURN_SPEED = 1.0             # rad/s, moveJ to the turned orientation (nothing held; was 0.5)
-TURN_ACCEL = 1.0             # rad/s^2 (was 0.5)
+TURN_SPEED = 1.5             # rad/s, moveJ to the turned orientation (nothing held; was 0.5, 1.0)
+TURN_ACCEL = 1.5             # rad/s^2 (was 0.5, 1.0)
 TURN_MAX_DIP = 0.02          # m, the TCP may sag this far below the safe height on the joint arc;
                              # a turn that sags more is done higher up (see SequenceTask.turn)
 TURN_RAISE_MARGIN = 0.01     # m, extra height each time the turn is raised
@@ -279,9 +282,9 @@ SPRAY_Q = [-1.55987, -2.38400, -2.13538, -0.22390, -2.67745, 2.29890]
 SPRAY_APPROACH = [-0.05, 0.0, 0.0]  # m in the base frame, start of the straight last bit: along
                                     # +x into the spray pose (the glass points +x there). Further
                                     # back folds the arm tighter (model: -15 mm at 5 cm, -24 at 10)
-SPRAY_MOVE_SPEED = 0.9       # rad/s, joint moves with the glass held (as FLIP_SPEED; was 0.5)
-SPRAY_MOVE_ACCEL = 0.9       # rad/s^2 (was 0.5)
-SPRAY_STROKES = 3            # pump strokes (was 6, 10, 5)
+SPRAY_MOVE_SPEED = 1.2       # rad/s, joint moves with the glass held (as FLIP_SPEED; was 0.5, 0.9)
+SPRAY_MOVE_ACCEL = 1.2       # rad/s^2 (was 0.5, 0.9)
+SPRAY_STROKES = 2            # pump strokes (was 6, 10, 5, 3)
 SPRAY_PERIOD = 1.2           # s between the starts of two strokes (bus_servos default 2.0; a stroke
                              # itself takes ~0.5 s: press, SPRAY_HOLD 0.2 s, release)
 SPRAY_TIMEOUT = SPRAY_STROKES * SPRAY_PERIOD + 8.0   # s, the strokes must be done by then
@@ -312,7 +315,7 @@ DRY_APPROACH = 0.10          # m back along the tool z axis, start of the straig
 DRY_DEPTH = 0.0              # m further along the tool z axis than the taught DRY_POSE
 DRY_TURNS_DEG = [180]        # deg, wrist 3 angles visited in order, relative to where it arrives
                              # (+ = the joint's plus direction); [60, -60] * 3 + [0] swings instead
-DRY_SPEED = 1.5              # rad/s, wrist 3 turns (the glass turns about its own axis)
+DRY_SPEED = 2.0              # rad/s, wrist 3 turns (the glass turns about its own axis; was 1.5)
 DRY_ACCEL = 3.0              # rad/s^2
 
 # --- start ----------------------------------------------------------------------
@@ -322,6 +325,7 @@ DRY_ACCEL = 3.0              # rad/s^2
 START_Q = [-0.98655, -1.34004, -1.79234, -0.99111, 1.10915, -1.47313]
 START_TOLERANCE_DEG = 1      # deg, every joint this close to START_Q counts as at the start
 GO_TO_START_FIRST = False    # p moves to START_Q first when away from it (False: starts where the arm is)
+PICK_ALL = True              # p does every glass, one after another (False: one glass per p)
 JOINT_LIMIT_MARGIN_DEG = 60  # deg, turn targets stay this far from the +-360 deg joint limits
 UNWIND_ABOVE_DEG = 200       # deg, a wrist further than this from zero is turned back a full
                              # turn at the start of a task (see SequenceTask.unwind)
@@ -368,9 +372,9 @@ SIDE_STANDOFF = 0.03         # m, gap between cup and wall before the slow appro
 SIDE_MAX_PRESS = 0.015       # m, go at most this far past the expected wall (camera error, cup compression; was 6 mm)
 SIDE_CONTACT_FORCE = 20.0     # N, stop the sideways approach early (a free glass slides before this)
 
-MOVE_SPEED = 0.35            # m/s, moveL (was 0.15)
-APPROACH_SPEED = 0.10        # m/s, moveL over to the glass and down next to it / onto the tag (was 0.05)
-MOVE_ACCEL = 0.8             # m/s^2 (keep low enough for the vacuum to hold the glass; was 0.6)
+MOVE_SPEED = 0.50            # m/s, moveL (was 0.15, 0.25, 0.35)
+APPROACH_SPEED = 0.15        # m/s, moveL over to the glass and down next to it / onto the tag (was 0.05, 0.10)
+MOVE_ACCEL = 1.0             # m/s^2 (keep low enough for the vacuum to hold the glass; was 0.6, 0.8)
 DESCEND_SPEED = 0.02         # m/s, slow final approach, stopped by the force sensor (was 0.015)
 DESCEND_ACCEL = 0.2
 CONTACT_FORCE = 10.0         # N, touching the glass foot
@@ -1585,6 +1589,8 @@ def main():
     tags = {}                        # place tag id -> last seen base x, y
     seen_tags = {}
     used_tags = set()                # glass put on it this round (c clears)
+    batch = False                    # PICK_ALL run going: the next glass after this one
+    batch_used = 0                   # len(used_tags) when p was pressed
     status = "p: pick & place  s: stop  g/r: grip/release  h: home  f: freedrive  q: quit"
     freedrive = False
     zone_corner = None               # first corner taught with b
@@ -1625,6 +1631,11 @@ def main():
                     status = task.status
                     if task.done:
                         pick_now = isinstance(task, HomeTask) and task.then_pick and task.arrived
+                        if isinstance(task, SequenceTask) and batch:
+                            # PICK_ALL: the next glass as soon as this one is done; a failed
+                            # one ends the run (its message stays in the window)
+                            pick_now = task.status == "done"
+                            batch = pick_now
                         task = None
                 # Backstop for moves that got above the ceiling anyway (safe_motion.py)
                 if task is not None and c.over_ceiling():
@@ -1653,6 +1664,7 @@ def main():
                     break
                 for key in keys:
                     if key == "s":
+                        batch = False                  # ends a PICK_ALL run too
                         if task is not None:
                             task.abort()
                             task = None
@@ -1731,6 +1743,8 @@ def main():
                         task = HomeTask(r, c)
                     elif key == "p":
                         jogger.stop()
+                        batch = PICK_ALL
+                        batch_used = len(used_tags)
                         if not GO_TO_START_FIRST or at_start(r):
                             pick_now = True
                         else:
@@ -1738,19 +1752,31 @@ def main():
                             task = HomeTask(r, c, then_pick=True)
 
                 if pick_now and task is None:
+                    done = len(used_tags) - batch_used       # glasses placed since p
                     if not tags:
                         status = warn("no place tag in view, p ignored")
+                        batch = False
                         continue
                     status = "measuring..."
                     measured = finder.measure(grabber, kick=watchdog.kick)
                     tag_id = next_place_tag(tags, used_tags, measured)
-                    if tag_id is None:
-                        status = warn(f"all place tags {sorted(tags)} used, p ignored (c clears them)")
-                        continue
                     glass = choose_glass(measured, tags)
+                    if glass is None and done:
+                        status = f"all glasses done, {done} placed"
+                        print(status)
+                        batch = False
+                        continue
+                    if tag_id is None:
+                        status = warn(f"all place tags {sorted(tags)} used"
+                                      + (f" after {done} glasses" if done else ", p ignored") + " (c clears them)")
+                        batch = False
+                        continue
                     if glass is None:
                         status = warn("no glass to pick (none found, or all on place tags), p ignored")
+                        batch = False
                         continue
+                    if done:
+                        print(f"Next glass ({done} placed so far)")
                     print(f"Glass at {glass.x * 1000:.0f}, {glass.y * 1000:.0f} mm "
                           f"({np.hypot(glass.x, glass.y) * 1000:.0f} mm from the base) -> tag {tag_id}")
                     task = SequenceTask(r, c, suction, glass, tags[tag_id], finder.table_z, GLASS_HEIGHT,
