@@ -1,23 +1,16 @@
 # Hacklab Alien Bazaar 2026: team Rabyte
 
+> 🥉 **We won 3rd place at Alien Bazaar 2026.**
+
 Code for team **Rabyte** at the [Alien Bazaar 2026](https://hacklab.so/hackathons/ab26) hardware hackathon (Warsaw, 25–27 Sep 2026, theme: home automation). Our pitch is "the ultimate party bot", built on a **Universal Robots UR5e** with a custom **vacuum (suction) gripper**.
 
-The current demo: an **overhead camera finds glasses** on the table, the robot **picks one up with the suction cup** and **puts it down on an AprilTag**. Other parts of the repo are side experiments: a wrist-camera AprilTag picker, a hoverboard drive base and bus-servo accessories (a rotator and a pump sprayer).
+The demo: an **overhead camera finds glasses** on the table, and the robot **picks one up with the suction cup**, flips it, **washes it** (sprayer, spinning sponge, drying swing) and **puts it down on an AprilTag**. Other parts of the repo are side experiments: a wrist-camera AprilTag picker, a hoverboard drive base and the bus-servo accessories (sponge rotator and pump sprayer).
 
-Background on the event, rules and other teams: [docs/brief.md](docs/brief.md).
-Known bugs and suggested improvements: [AUDIT.md](AUDIT.md).
+This is **hackathon code**, written over the hackathon weekend and tidied up a little afterwards. It is shared as a reference, not as a maintained library. It moves a real industrial robot: read [§13 Safety limits](#13-safety-limits) first, and use it at your own risk.
 
-The washing-system supervisor is a tick-driven batch controller. It has
-simulated robot, gripper and station drives, output reservations, STOP/fault
-handling, station-height clearance checks on a fictional layout and JSONL events.
-It also has a browser panel (START/STOP/RESET, batch progress, outputs and
-live events) and an optional classic overhead-camera observer. From the
-repository root, run `python ur5e_experiments/system_main.py --simulate --fast`
-(CLI) or `python ur5e_experiments/system_main.py --simulate --web` (panel). See
-[supervisor usage and current scope](docs/supervisor.md) and the
-[implementation plan](docs/system_supervisor_plan.md). Hardware adapters for
-the robot (SafeControl + watchdog), the gripper and the servos and a teach
-mode exist (`--hardware --web --teach`) but have only been tested against fakes.
+- Known bugs and suggested improvements: [docs/AUDIT.md](docs/AUDIT.md).
+- Background on the event and rules: [docs/brief.md](docs/brief.md).
+- A washing-cell supervisor with a web panel was also written but **not used** in the demo: see [§16](#16-unused-washing-cell-supervisor-with-web-panel).
 
 ---
 
@@ -38,6 +31,7 @@ mode exist (`--hardware --web --teach`) but have only been tested against fakes.
 13. [Safety limits](#13-safety-limits)
 14. [Where to change settings](#14-where-to-change-settings)
 15. [Troubleshooting](#15-troubleshooting)
+16. [Unused: washing-cell supervisor with web panel](#16-unused-washing-cell-supervisor-with-web-panel)
 
 ---
 
@@ -92,12 +86,16 @@ All motion runs on the laptop. The robot runs the `ur_rtde` control script, whic
 alien_bazaar_2026/
 ├── README.md                          ← this file
 ├── CLAUDE.md                          ← guidance for AI coding assistants
-├── AUDIT.md                           ← code audit + improvement roadmap
-├── docs/brief.md                      ← hackathon brief (rules, hardware, teams)
+├── docs/
+│   ├── AUDIT.md                       ← code audit + improvement roadmap
+│   ├── brief.md                       ← hackathon brief (rules, hardware)
+│   ├── supervisor.md                  ← unused supervisor: usage (Polish), see §16
+│   └── system_supervisor_plan.md      ← unused supervisor: design plan (Polish)
 │
 ├── ur5e_experiments/                  ← everything that runs the robot
-│   ├── pick_place_glasses.py          ★ main demo: overhead camera → pick glass → place on tag
+│   ├── pick_place_glasses.py          ★ main demo: overhead camera → pick glass → wash → place on tag
 │   ├── find_glasses.py                ★ glass detection + overhead-camera calibration (library + tool)
+│   ├── safe_motion.py                 SafeControl: every motion command goes through its Z-ceiling check
 │   ├── follow_april_tag.py            wrist-camera AprilTag picker; also the shared-constants hub
 │   ├── hand_eye_calibration.py        automatic wrist camera ↔ TCP calibration
 │   ├── calibrate_camera.py            lens calibration with a ChArUco board (either camera)
@@ -106,6 +104,9 @@ alien_bazaar_2026/
 │   ├── suction.py                     host driver for the gripper serial protocol
 │   ├── bus_servos.py                  Feetech/Waveshare STS bus servos: rotator + sprayer
 │   ├── gamepad_robot_teleop.py        plain gamepad teleop with auto fault recovery
+│   ├── read_force.py, plot_force.py   print / live-plot the UR5e force-torque sensor (read only)
+│   ├── system_*.py, web/              unused washing-cell supervisor + browser panel (§16)
+│   ├── tests/                         offline tests with fakes (§4.4)
 │   ├── gamepad_robot_move.py          early experiment (blocking moveL), legacy
 │   ├── move_robot.py                  first RTDE hello-world (URSim at 127.0.0.1), legacy
 │   ├── charuco_board.png              printable calibration board
@@ -183,7 +184,7 @@ pip install pytest pyflakes
 python -m pytest ur5e_experiments/tests hoverboard_experiments/tests
 ```
 
-No robot, gripper, camera or gamepad needed; takes about a second. They check the geometry (frames, back-projection, camera pose, hand-eye solver), the jog Z limits, the motion watchdog and the suction driver against fakes, the servo packets, the hoverboard framing against the protocol's reference client, and (with pyflakes) every script for undefined names, the kind of bug that crashed `gamepad_robot_teleop.py` (AUDIT #1). Run them before a demo and after every change.
+No robot, gripper, camera or gamepad needed; takes about a second. They check the geometry (frames, back-projection, camera pose, hand-eye solver), the jog Z limits, the motion watchdog and the suction driver against fakes, the servo packets, the hoverboard framing against the protocol's reference client, and (with pyflakes) every script for undefined names, the kind of bug that crashed `gamepad_robot_teleop.py` ([AUDIT](docs/AUDIT.md) #1). Run them before a demo and after every change.
 
 ### 4.5 Gripper firmware
 
@@ -509,3 +510,23 @@ To find COM ports: Device Manager → Ports, or `python -m serial.tools.list_por
 | Grip always times out | Check `python suction.py` and the COM port. `GRIP FAIL` means the seal never reached 180 hPa: the cup or glass surface is dirty or wet, or the approach is off-centre. A `GRIP` while the vacuum is already on is answered with `ERR BUSY` and is harmless: the grip session and its last result stay as they are |
 | "Suction gripper not available, running without it" | `COM9` is missing, or the port is busy (a serial monitor is still open?) |
 | Gamepad does nothing | `No gamepad found, keyboard only` is printed at start. Plug it in before starting the script |
+
+---
+
+## 16. Unused: washing-cell supervisor with web panel
+
+During the hackathon we also wrote a **supervisor for a full glass-washing cell** (`ur5e_experiments/system_*.py`, `ur5e_experiments/web/`). **It was not used in the demo**, which ran on `pick_place_glasses.py`. It is kept here because it works in simulation and may be a useful starting point.
+
+- A tick-driven batch controller with simulated robot, gripper and station drives, output-slot reservations, STOP / fault handling, station-height clearance checks on a fictional layout, and a JSONL event journal.
+- A **browser panel** (START / STOP / RESET, batch progress, output slots, live events over SSE, optional MJPEG camera view) served by the Python standard library, plus an optional overhead-camera observer.
+- Hardware adapters for the robot (through `SafeControl` + watchdog), the gripper and the servos, and a teach mode, exist but **have only been tested against fakes, never on the robot**.
+
+```powershell
+# from the repository root; the simulation needs only the standard library
+python ur5e_experiments/system_main.py --simulate --fast   # CLI run of a simulated batch
+python ur5e_experiments/system_main.py --simulate --web    # panel at http://127.0.0.1:8765
+```
+
+> **The web panel has no authentication.** Anyone who can reach the port can control the cell. It binds to loopback by default; binding to the LAN is an explicit option and gives every host on it control.
+
+Details (in Polish): [usage and current scope](docs/supervisor.md) and the [implementation plan](docs/system_supervisor_plan.md).

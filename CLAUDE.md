@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for AI coding assistants working in this repo. Human-facing docs are in [README.md](README.md). Known bugs and the roadmap are in [AUDIT.md](AUDIT.md).
+Guidance for AI coding assistants working in this repo. Human-facing docs are in [README.md](README.md). Known bugs and the roadmap are in [docs/AUDIT.md](docs/AUDIT.md).
 
 ## What this is
 
@@ -73,6 +73,6 @@ The tests (`ur5e_experiments/tests`, `hoverboard_experiments/tests`) cover the p
 ## Don't
 
 - Don't commit or delete the calibration data (`*.npz`, `detection_*.json`, `overhead_calibration_points.json`) without asking. It takes robot time to recreate.
-- Don't add `Gripper/.pio/` build output to commits (it is ignored, but old artifacts are still tracked; see AUDIT.md #14).
+- Don't add `Gripper/.pio/` build output to commits (it is ignored, but old artifacts are still tracked; see docs/AUDIT.md #14).
 - Don't introduce ROS or other heavy frameworks. The stack is deliberately `ur_rtde` + OpenCV + pyserial.
 - Don't assume COM ports or camera indices. They are machine-specific and set in the constants (see README §14).
